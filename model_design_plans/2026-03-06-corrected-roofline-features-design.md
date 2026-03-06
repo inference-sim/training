@@ -33,7 +33,7 @@ StepTime = β₁ · max(F_pf_compute, F_pf_kv)     prefill phase bottleneck
          + β₃ · F_weight_static                  attention + dense/shared FFN weights
          + β₄ · F_weight_moe                     routed expert weights
          + β₅ · F_tp                             TP all-reduce (custom IPC kernel)
-         + β₆ · batch_size                       CPU scheduling overhead (per-request)
+         + β₆ · num_requests_per_step              CPU scheduling overhead (per-request)
          + β₇                                    constant overhead (intercept)
 ```
 
@@ -43,7 +43,7 @@ StepTime = β₁ · max(F_pf_compute, F_pf_kv)     prefill phase bottleneck
 
 **Sequential-phase assumption:** The formula adds prefill and decode phases. In vLLM v0.8+, a single step processes mixed batches where prefill and decode tokens are scheduled together into one `model_runner.execute_model()` call. The GPU may interleave prefill compute warps with decode memory-bound warps. The additive treatment is conservative (overestimates) — β₁, β₂ fit < 1.0 to compensate for any overlap. This is the standard approach in DuetServe, Vidur, and Pope et al.
 
-**Why β₆ · batch_size:** vLLM's `prepare_model_input()` iterates every request to build block tables, slot mappings, and sampling parameters. This CPU work scales linearly with B and is architecture-independent (doesn't scale with hidden_dim or num_layers), making it identifiable in cross-model fitting. For single-model fits, β₆ is confounded with the decode terms — harmless, β₂ absorbs it.
+**Why β₆ · num_requests_per_step:** vLLM's `prepare_model_input()` iterates every request to build block tables, slot mappings, and sampling parameters. This CPU work scales linearly with B and is architecture-independent (doesn't scale with hidden_dim or num_layers), making it identifiable in cross-model fitting. For single-model fits, β₆ is confounded with the decode terms — harmless, β₂ absorbs it.
 
 ---
 
@@ -59,7 +59,7 @@ StepTime = β₁ · max(F_pf_compute, F_pf_kv)     prefill phase bottleneck
 | kv_heads | `num_key_value_heads` | KV heads (GQA) |
 | d_h | d / H | Head dimension |
 | d_kv | kv_heads · d_h | Full KV dimension |
-| d_ff | `intermediate_size` | Dense/shared-expert FFN intermediate dim |
+| d_ff | `intermediate_size` | Dense FFN intermediate dim |
 | d_ff_expert | `moe_intermediate_size` | **NEW.** Routed/shared expert FFN intermediate dim (may differ from d_ff; e.g., DeepSeek-V3: d_ff=18432, d_ff_expert=2048 — 9× smaller) |
 | N | `num_local_experts` | Routed experts (0 = dense) |
 | k | `num_experts_per_tok` | Active experts per token |
@@ -75,14 +75,14 @@ StepTime = β₁ · max(F_pf_compute, F_pf_kv)     prefill phase bottleneck
 |--------|---------|-------|
 | k_eff | max(1, k) | 1 for dense models |
 | N_eff(B) | min(N, max(k, B·k)) | Batch-dependent loaded experts; 1 for dense |
-| L_moe | L − first_k_dense (if N > 0, else 0) | MoE FFN layers |
+| L_moe | count of layers where `i >= first_k_dense AND i % moe_layer_freq == 0` (if N > 0, else 0). Simplifies to `L − first_k_dense` when `moe_layer_freq = 1` (all current models) | MoE FFN layers |
 | L_dense | L − L_moe | Dense FFN layers |
 | d_kv_cache | standard: 2·kv_heads·d_h; MLA: kv_lora_rank + qk_rope_head_dim | Cached KV elements per token per layer (pre-TP) |
 | d_kv_eff | standard: d_kv_cache / TP; MLA: d_kv_cache (not TP-sharded) | Per-rank cached KV elements |
 | bpp | bytes_per_param | Weight precision (typically 2 for fp16) |
 | bytes | bytes_per_elem | KV cache precision (typically 2 for fp16) |
 
-**MLA KV cache:** Stores compressed latent `c_kv` (dim `kv_lora_rank`) plus decoupled RoPE key `k_R` (dim `qk_rope_head_dim`). Total = 576 elements for DeepSeek-V2/V3 (512 + 64), vs 32,768 for standard MHA — a ~57× compression. The RoPE key must be cached separately because positional encoding cannot be applied to the compressed representation.
+**MLA KV cache:** Stores compressed latent `c_kv` (dim `kv_lora_rank`) plus decoupled RoPE key `k_R` (dim `qk_rope_head_dim`). Total = 576 elements for DeepSeek-V2/V3 (512 + 64), vs 32,768 for equivalent standard MHA (2 · H · qk_nope_head_dim = 2 · 128 · 128, using the MLA effective per-head dimension, not d/H) — a ~57× compression. The RoPE key must be cached separately because positional encoding cannot be applied to the compressed representation.
 
 ### Parallelism
 
@@ -96,7 +96,8 @@ All experts present on every GPU, weights TP-sharded. 2× AllReduce per layer (p
 
 - **Prefill requests**: ProgressIndex < len(InputTokens). Context S = ProgressIndex. New tokens T_new = NumNewTokens.
 - **Decode requests**: ProgressIndex ≥ len(InputTokens). Context S = ProgressIndex. New tokens = 1.
-- T_pf = total new prefill tokens. T_dc = total decode tokens. T_total = T_pf + T_dc. B = batch size.
+- T_pf = total new prefill tokens. T_dc = total decode tokens. T_total = T_pf + T_dc.
+- B = num_requests_per_step = number of requests scheduled in this step (not token count). In vLLM's continuous batching, B changes every step as requests arrive and complete. A step may contain a mix of prefill and decode requests.
 
 ---
 
@@ -291,10 +292,10 @@ Normalized by HBM bandwidth (not NVLink). β₅ absorbs the NVLink/HBM ratio (~3
 ### 4.8 Overhead Terms (learned, no physics prior)
 
 ```
-β₆ · batch_size + β₇   [µs]
+β₆ · num_requests_per_step + β₇   [µs]
 ```
 
-- **β₆ · batch_size:** CPU scheduling overhead that scales per-request. In vLLM, `prepare_model_input()` builds per-request block tables, slot mappings, and sampling parameters — O(B) CPU work before each GPU step.
+- **β₆ · num_requests_per_step:** CPU scheduling overhead that scales per-request. In vLLM, `prepare_model_input()` builds per-request block tables, slot mappings, and sampling parameters — O(B) CPU work before each GPU step.
 - **β₇ (intercept):** Fixed per-step cost — kernel launch overhead, CUDA graph replay overhead, driver dispatch. Subsumes the old `L · perLayerOverhead` term (per-layer overhead is already captured by β₁–β₅ which all scale with L).
 
 No analytical model — learned directly from vLLM training data. Addresses #482 (zero inter-step overhead in existing backends).
@@ -305,10 +306,10 @@ No analytical model — learned directly from vLLM training data. Addresses #482
 
 | Feature | Dense (Llama) | MoE (Mixtral) | MoE+shared+MLA (DeepSeek-V3) |
 |---------|---------------|---------------|-------------------------------|
-| F_pf_compute | QKV+attn+O + dense_ffn | same + k·routed_ffn | Q+absorption+scores(noPE+RoPE)+O + k·routed + shared |
+| F_pf_compute | QKV+attn+O + dense_ffn | same + k·routed_ffn | DKV+Q+absorption+scores(noPE+RoPE)+O + k·routed + shared |
 | F_pf_kv | 2·kv_heads·d_h / TP | same | kv_lora_rank + qk_rope_head_dim (replicated) |
 | F_dc_kv | 2·kv_heads·d_h · Σ S / TP | same | (kv_lora_rank + qk_rope_head_dim) · Σ S |
-| F_weight_static | attn + ffn | attn | W_DKV + W_Q + W_UK + W_UV + W_O + shared |
+| F_weight_static | attn + ffn | attn | W_DKV + W_Q + W_UK + W_UV + W_O + shared + dense_ffn (first_k_dense layers) |
 | F_weight_moe | 0 | N_eff · expert_weights / TP | N_eff · expert_weights / TP |
 | F_tp | 2L allreduce | 2L allreduce | 2L allreduce |
 
@@ -327,6 +328,7 @@ No analytical model — learned directly from vLLM training data. Addresses #482
 | `VHeadDim` | int | 0 | `v_head_dim` in config.json (0 = use qk_nope_head_dim). Used in MLA V absorption + W_O |
 | `QKRopeHeadDim` | int | 0 | `qk_rope_head_dim` in config.json (0 = standard) |
 | `FirstKDenseReplace` | int | 0 | `first_k_dense_replace` in config.json (0 = all MoE if experts > 0) |
+| `MoELayerFreq` | int | 1 | `moe_layer_freq` in config.json (1 = every layer after first_k_dense is MoE). vLLM selects MoE for layer i when `i >= first_k_dense AND i % moe_layer_freq == 0`. All current models use 1; included for correctness |
 
 No new HardwareCalib fields required. Step time features use only `TFlopsPeak` and `BwPeakTBs`; KV capacity auto-calculation uses `MemoryGiB`. All three are datasheet values — no empirical calibration needed for unseen hardware. MFU and BW_eff are absorbed by β coefficients.
 
@@ -338,11 +340,11 @@ No new HardwareCalib fields required. Step time features use only `TFlopsPeak` a
 
 | Condition | Effect |
 |-----------|--------|
-| Pure dense, TP=1 | Only F_pf_compute, F_pf_kv, F_dc_compute, F_dc_kv, F_weight_static, β₆·B, β₇ nonzero |
+| Pure dense, TP=1 | Only F_pf_compute, F_pf_kv, F_dc_compute, F_dc_kv, F_weight_static, β₆·num_requests_per_step, β₇ nonzero |
 | MoE, TP>1 | All experts on every GPU (TP-sharded). 2L AllReduce |
 | MLA, TP=1 | F_pf_kv and F_dc_kv use compressed dim. Absorbed attention FLOPs |
 | MLA, TP>1 | KV cache replicated on all TP ranks (MLA can't shard KV by head) |
-| Empty batch | StepTime = β₇ (floored to 0) |
+| Empty batch (T_total=0) | StepTime = β₃ · F_weight_static + β₄ · F_weight_moe + β₇ (F_weight_static and F_weight_moe are architecture-constant, nonzero even at B=0; in practice vLLM skips empty steps, so this case rarely arises) |
 | All β = 1.0, β₆=β₇=0 | Pure analytical roofline (no corrections, no overhead) |
 
 ---
@@ -375,7 +377,7 @@ No new HardwareCalib fields required. Step time features use only `TFlopsPeak` a
 **Collinearity notes:**
 - **F_weight_static vs β₇ (intercept):** In single-model fits, F_weight_static is constant (same architecture every step) → perfectly collinear with the intercept. Only identifiable in cross-model fitting where architecture varies across training samples. For single-model fits, β₃ and β₇ are jointly absorbed — this is acceptable since total overhead is still predicted correctly.
 - **F_dc_compute vs F_dc_kv:** For memory-bound decode (most configurations), these are near-collinear (both scale linearly with Σ S_i). The `max()` operation breaks symmetry only at the compute-bound crossover. If β₂ confidence intervals are wide, consider constraining β₂ ∈ [0.5, 3.0] or fitting with ridge regularization.
-- **β₆ (batch_size) vs decode terms:** In single-model fits, batch_size and decode token count are correlated (more requests = more decode tokens). Identifiable in cross-model fitting or with varied batch compositions (different prefill/decode ratios).
+- **β₆ (num_requests_per_step) vs decode terms:** In single-model fits, num_requests_per_step and decode token count are correlated (more requests = more decode tokens). Identifiable in cross-model fitting or with varied batch compositions (different prefill/decode ratios).
 
 ### Cross-hardware transfer
 
@@ -485,7 +487,7 @@ Each β requires specific workload variation to be learnable. Without it, β bec
 | β₃ | Static weights | **Cross-model only.** F_weight_static is constant within a single model → identical to intercept. Need ≥3 models with different weight sizes (e.g., 8B, 22B, 70B) | β₇ (intercept) in single-model fits |
 | β₄ | MoE weights | Need MoE models. Vary batch size (B=1→128) so N_eff changes (at B=1, N_eff=k; at B=64, N_eff→N). Dense models contribute nothing | β₃ if only dense models used |
 | β₅ | TP comms | Need TP>1 configs. Vary T_total (different batch sizes) at each TP to see msg size vary. TP=1 contributes nothing (F_tp=0) | Not identifiable from TP=1 data alone |
-| β₆ | CPU overhead | Vary batch size B independently of token counts. Key: prefill-heavy batches where B is small but T_pf is large (long prompts), vs decode-heavy batches where B is large but T_dc ≈ B | β₂ if B always scales with decode tokens |
+| β₆ | CPU overhead | Vary num_requests_per_step (B) independently of token counts. Key: prefill-heavy batches where B is small but T_pf is large (long prompts), vs decode-heavy batches where B is large but T_dc ≈ B | β₂ if B always scales with decode tokens |
 | β₇ | Intercept | Small batches (B=1,2) anchor the constant. Also anchored by cross-model data where other features vary but overhead is stable | β₃ in single-model fits |
 
 **Recommended workload sweep per model/TP config:**

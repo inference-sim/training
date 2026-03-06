@@ -1,0 +1,30 @@
+{
+  "name": "H100 NVL",
+  "vendor": "NVIDIA",
+  "architecture": "Hopper",
+  "compute": {
+    "fp64": 30,
+    "fp64_tensor_core": 60,
+    "fp32": 60,
+    "tf32_tensor_core": 835,
+    "bf16_tensor_core": 1671,
+    "fp16_tensor_core": 1671,
+    "fp8_tensor_core": 3341,
+    "int8_tensor_core": 3341,
+    "with_sparsity": true
+  },
+  "memory": {
+    "capacity_gb": 94,
+    "bandwidth_tb_s": 3.9
+  },
+  "interconnect": {
+    "nvlink_bandwidth_gb_s": 600,
+    "pcie_bandwidth_gb_s": 128
+  },
+  "power": {
+    "tdp_watts": 400
+  },
+  "mig_partitions": 7,
+  "form_factor": "PCIe dual-slot air-cooled",
+  "datasheet_id": "2430615"
+}

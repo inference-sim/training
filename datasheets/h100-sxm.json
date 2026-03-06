@@ -1,0 +1,30 @@
+{
+  "name": "H100 SXM",
+  "vendor": "NVIDIA",
+  "architecture": "Hopper",
+  "compute": {
+    "fp64": 34,
+    "fp64_tensor_core": 67,
+    "fp32": 67,
+    "tf32_tensor_core": 989,
+    "bf16_tensor_core": 1979,
+    "fp16_tensor_core": 1979,
+    "fp8_tensor_core": 3958,
+    "int8_tensor_core": 3958,
+    "with_sparsity": true
+  },
+  "memory": {
+    "capacity_gb": 80,
+    "bandwidth_tb_s": 3.35
+  },
+  "interconnect": {
+    "nvlink_bandwidth_gb_s": 900,
+    "pcie_bandwidth_gb_s": 128
+  },
+  "power": {
+    "tdp_watts": 700
+  },
+  "mig_partitions": 7,
+  "form_factor": "SXM",
+  "datasheet_id": "2430615"
+}

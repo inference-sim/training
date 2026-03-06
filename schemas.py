@@ -1396,3 +1396,105 @@ class TrainingDataset(BaseModel):
         description="Map of experiment directory name to its contents. "
         "Key format: 'YYYYMMDD-HHMMSS-<model>-tp<N>-<profile>'."
     )
+
+
+# =============================================================================
+# 10. GPU HARDWARE SPECIFICATIONS
+# =============================================================================
+#
+# Datasheet values from vendor-published specifications.
+# One JSON file per GPU variant lives in datasheets/.
+# =============================================================================
+
+
+class ComputeSpecs(BaseModel):
+    """Peak compute throughput at various precisions.
+
+    All values in teraFLOPS (1e12 FLOP/s), as printed on the vendor
+    datasheet.  Tensor Core entries marked with_sparsity=True include
+    2:4 structured sparsity; divide by 2 for dense throughput.
+    """
+
+    fp64: float = Field(description="FP64 CUDA core peak (TFLOPS).")
+    fp64_tensor_core: float = Field(description="FP64 Tensor Core peak (TFLOPS).")
+    fp32: float = Field(description="FP32 CUDA core peak (TFLOPS).")
+    tf32_tensor_core: float = Field(
+        description="TF32 Tensor Core peak (TFLOPS). With sparsity on NVIDIA datasheets."
+    )
+    bf16_tensor_core: float = Field(
+        description="BF16 Tensor Core peak (TFLOPS). With sparsity on NVIDIA datasheets."
+    )
+    fp16_tensor_core: float = Field(
+        description="FP16 Tensor Core peak (TFLOPS). With sparsity on NVIDIA datasheets."
+    )
+    fp8_tensor_core: float = Field(
+        description="FP8 Tensor Core peak (TFLOPS). With sparsity on NVIDIA datasheets."
+    )
+    int8_tensor_core: float = Field(
+        description="INT8 Tensor Core peak (TOPS). With sparsity on NVIDIA datasheets."
+    )
+    with_sparsity: bool = Field(
+        description="Whether Tensor Core values include 2:4 structured sparsity. "
+        "If true, divide Tensor Core values by 2 for dense throughput."
+    )
+
+
+class MemorySpecs(BaseModel):
+    """GPU memory capacity and bandwidth."""
+
+    capacity_gb: float = Field(description="Total GPU memory (GB). E.g., 80 for H100 SXM.")
+    bandwidth_tb_s: float = Field(
+        description="Peak HBM bandwidth (TB/s). E.g., 3.35 for H100 SXM."
+    )
+
+
+class InterconnectSpecs(BaseModel):
+    """Inter-GPU and host interconnect specifications."""
+
+    nvlink_bandwidth_gb_s: float = Field(
+        description="NVLink bidirectional bandwidth per GPU (GB/s). "
+        "900 for H100 SXM, 600 for H100 NVL."
+    )
+    pcie_bandwidth_gb_s: float = Field(
+        description="PCIe bandwidth (GB/s). 128 for PCIe Gen5."
+    )
+
+
+class PowerSpecs(BaseModel):
+    """Thermal design power."""
+
+    tdp_watts: float = Field(
+        description="Maximum thermal design power (watts). "
+        "700 for H100 SXM, 350-400 for H100 NVL."
+    )
+
+
+class DatasheetSpec(BaseModel):
+    """GPU specifications extracted from the vendor datasheet.
+
+    One instance per GPU variant (e.g., H100 SXM, H100 NVL).
+    All values are peak/theoretical from the published datasheet.
+
+    Source: datasheets/<vendor>-<gpu>-datasheet-<id>.pdf
+    """
+
+    name: str = Field(description="GPU variant name. E.g., 'H100 SXM', 'H100 NVL'.")
+    vendor: str = Field(description="GPU vendor. E.g., 'NVIDIA'.")
+    architecture: str = Field(description="GPU architecture. E.g., 'Hopper'.")
+    compute: ComputeSpecs
+    memory: MemorySpecs
+    interconnect: InterconnectSpecs
+    power: PowerSpecs
+    mig_partitions: Optional[int] = Field(
+        None,
+        description="Maximum number of MIG partitions. 7 for H100.",
+    )
+    form_factor: Optional[str] = Field(
+        None,
+        description="Physical form factor. E.g., 'SXM', 'PCIe dual-slot air-cooled'.",
+    )
+    datasheet_id: Optional[str] = Field(
+        None,
+        description="Vendor datasheet document ID for traceability. "
+        "E.g., '2430615' from nvidia-h100-datasheet-2430615.pdf.",
+    )

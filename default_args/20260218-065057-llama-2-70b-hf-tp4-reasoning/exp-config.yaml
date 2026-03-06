@@ -1,0 +1,6 @@
+model: meta-llama/Llama-2-70b-hf
+tensor_parallelism: 4
+max_model_len: 4096
+max_num_batched_tokens: 2048
+max_num_seqs: 128
+app: inference-perf

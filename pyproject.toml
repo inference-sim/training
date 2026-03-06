@@ -1,0 +1,14 @@
+[project]
+name = "inference-sim-training"
+version = "0.1.0"
+description = "Training data and utilities for the inference-sim latency prediction model"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff",
+    "pytest",
+]

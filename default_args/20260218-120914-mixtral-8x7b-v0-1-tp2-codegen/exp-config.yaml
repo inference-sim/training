@@ -1,0 +1,6 @@
+model: mistralai/Mixtral-8x7B-v0.1
+tensor_parallelism: 2
+max_model_len: 4096
+max_num_batched_tokens: 2048
+max_num_seqs: 128
+app: inference-perf

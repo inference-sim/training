@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "disable_existing_loggers": false,
+  "handlers": {
+    "file": {
+      "class": "logging.FileHandler",
+      "filename": "/mnt/exp/20260218-130541-mixtral-8x7b-tp2-general-2/vllm.log",
+      "level": "INFO",
+      "formatter": "simple"
+    }
+  },
+  "formatters": {
+    "simple": {
+      "format": "%(asctime)s %(levelname)s %(name)s: %(message)s"
+    }
+  },
+  "loggers": {
+    "vllm": {
+      "handlers": ["file"],
+      "level": "INFO",
+      "propagate": false
+    }
+  }
+}

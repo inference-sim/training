@@ -8,7 +8,7 @@ This repo contains 16 experiments (4 models x 4 workload profiles) of vLLM servi
 
 1. **Validates** trace data integrity (`validate_traces.py`)
 2. **Reconstructs** per-step batch composition from journey events (`reconstruct_steps.py`)
-3. **Computes** analytical basis functions for the latency model (`basis_functions.py` — planned)
+3. **Computes** analytical basis functions for the latency model (`basis_functions.py`)
 4. **Fits** 10 model coefficients via two-phase optimization (`fit_coefficients.py` — planned)
 5. **Evaluates** accuracy against held-out experiments (`evaluate.py` — planned)
 
@@ -30,10 +30,12 @@ schemas.py              Pydantic schemas for all data formats
 trace_parser.py         Shared OTEL trace parsing utilities
 validate_traces.py      Journey trace validation (5 correctness checks)
 reconstruct_steps.py    Step reconstruction from journey events
+basis_functions.py      Analytical basis functions for the latency model
 
 tests/                  Behavioral unit tests
   conftest.py             JourneyBuilder fixture for synthetic trace data
   test_reconstruct_steps.py
+  test_basis_functions.py
 
 model_configs/          HuggingFace config.json per model
 datasheets/             GPU hardware specs (H100 SXM)

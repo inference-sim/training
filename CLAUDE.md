@@ -19,6 +19,7 @@ python3 split.py                # print train/validate/test summary
 - `trace_parser.py` provides shared OTEL parsing. Owns all knowledge of the JSONL/span nesting format.
 - `schemas.py` defines Pydantic schemas for all data file formats (traces, metrics, configs).
 - `reconstruct_steps.py` is the core module. Public API: `reconstruct_experiment()` (end-to-end) and `reconstruct_timelines()` (testable core, no filesystem).
+- `basis_functions.py` computes analytical roofline basis functions (µs) per step. Each basis function is a standalone pure function for extensibility. Public API: `compute_step_basis()` and `compute_experiment_basis()`.
 - `validate_traces.py` is independent verification. Does NOT import from `reconstruct_steps.py`.
 
 Output structure: `output/validate/<exp>.json` and `output/reconstruct/<exp>.json`, each with a `summary.json`.

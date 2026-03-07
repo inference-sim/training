@@ -76,7 +76,7 @@ Note on ground-truth alignment: `RequestLabel.processing_us` = FINISHED.ts − S
 
 ### Stage 1 — Validation (`validate_traces.py`)
 
-**Done.** Validates journey trace integrity across all 16 experiments.
+**Done.** Validates journey trace integrity across all 13 active experiments.
 
 5 correctness checks per request:
 
@@ -270,7 +270,7 @@ X_dc(r) = [0,                               # β₁   (prefill roofline — not 
             num_decode_steps]                # β₇
 ```
 
-Note: β₁ and β₂ use **selective accumulation** — prefill entries only accumulate β₁ (prefill roofline), decode entries only accumulate β₂ (decode roofline). This matches the original `build_feature_matrix` semantics and preserves the sum invariant. The shared columns β₃-β₇ are accumulated by any entry in the step.
+Note: β₁ and β₂ use **selective accumulation** — prefill entries only accumulate β₁ (prefill roofline), decode entries only accumulate β₂ (decode roofline). This matches the original single-row formulation semantics and preserves the sum invariant. The shared columns β₃-β₇ are accumulated by any entry in the step.
 
 The stacked system solves a single NNLS problem:
 
@@ -358,7 +358,7 @@ Evaluation targets (each component evaluated independently against its own signa
 
 ## Dataset
 
-16 experiments: 4 models × 4 profiles, collected with [inference-perf](https://github.com/kubernetes-sigs/inference-perf) against instrumented vLLM on H100 SXM GPUs.
+16 experiments (13 active + 3 excluded overload): 4 models × 4 profiles, collected with [inference-perf](https://github.com/kubernetes-sigs/inference-perf) against instrumented vLLM on H100 SXM GPUs.
 
 | Model | TP | Attention | MoE |
 |-------|----|-----------|-----|
@@ -371,11 +371,11 @@ Evaluation targets (each component evaluated independently against its own signa
 
 3 of the 16 experiments are in the **overload regime** (high failure rates due to preemption cascades and timeouts):
 
-| Experiment | Failure rate | Current split |
-|------------|-------------|---------------|
-| llama-2-7b reasoning | 85% | test |
-| llama-2-70b reasoning | 33% | test |
-| mixtral-8x7b reasoning | 69% | validate |
+| Experiment | Failure rate |
+|------------|-------------|
+| llama-2-7b reasoning | 85% |
+| llama-2-70b reasoning | 33% |
+| mixtral-8x7b reasoning | 69% |
 
 These experiments are excluded from the active dataset. The linear step-time model cannot capture the nonlinear dynamics of overload (preemption cascades amplify latency non-linearly), and including them contaminates validation MSE (the mixtral-reasoning experiment alone contributed 7-second RMSE, dominating the validation signal).
 

@@ -25,7 +25,7 @@ reconstruct_timelines(timelines, budget) -> (steps, labels)
     This is the function behavioral tests should target.
 
 Usage:
-    python reconstruct_steps.py          # process all 16 experiments
+    python reconstruct_steps.py          # process all active experiments
     python -c "from reconstruct_steps import reconstruct_experiment; ..."
 """
 
@@ -109,6 +109,17 @@ class RequestLabel:
     failed: bool
     first_step: int
     last_step: int
+
+    def __post_init__(self) -> None:
+        if not self.failed:
+            diff = abs(self.prefill_processing_us + self.decode_processing_us - self.processing_us)
+            if diff > 0.1:  # µs tolerance for float arithmetic
+                raise ValueError(
+                    f"RequestLabel {self.request_id}: decomposition violated: "
+                    f"prefill({self.prefill_processing_us:.1f}) + "
+                    f"decode({self.decode_processing_us:.1f}) != "
+                    f"processing({self.processing_us:.1f}), diff={diff:.1f}"
+                )
 
 @dataclass(frozen=True)
 class ExperimentReconstruction:

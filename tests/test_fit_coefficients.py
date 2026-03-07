@@ -167,13 +167,29 @@ class TestStackedFeatureMatrix:
         assert abs(y[n + idx_a] - 4500.0) < 0.01  # decode target
 
     def test_feature_sum_invariant(self, data):
-        """X_pf[i] + X_dc[i] equals what the old single-row formulation produced."""
+        """X_pf[i] + X_dc[i] equals total features across all active steps."""
         from fit_coefficients import build_stacked_feature_matrix
         X, y, req_ids = build_stacked_feature_matrix(*data)
         n = len(req_ids)
-        for i in range(n):
-            X_total = X[i] + X[n + i]  # prefill row + decode row
-            assert all(X_total[j] >= 0 for j in range(7))
+        idx_a = req_ids.index("req-A")
+        X_total_a = X[idx_a] + X[n + idx_a]
+        # req-A: step 1 (prefill) + step 2 (decode)
+        assert abs(X_total_a[0] - 100.0) < 0.01  # β₁ from prefill step 1 only
+        assert abs(X_total_a[1] - 90.0) < 0.01   # β₂ from decode step 2 only
+        assert abs(X_total_a[2] - 400.0) < 0.01  # weight: 200+200
+        assert abs(X_total_a[3] - 65.0) < 0.01   # tp: 30+35
+        assert abs(X_total_a[4] - 64.0) < 0.01   # layers: 32+32
+        assert abs(X_total_a[5] - 4.0) < 0.01    # batch: 2+2
+
+    def test_y_target_sum_invariant(self, data):
+        """y[i] + y[n+i] == processing_us for each request."""
+        from fit_coefficients import build_stacked_feature_matrix
+        X, y, req_ids = build_stacked_feature_matrix(*data)
+        n = len(req_ids)
+        idx_a = req_ids.index("req-A")
+        idx_b = req_ids.index("req-B")
+        assert abs(y[idx_a] + y[n + idx_a] - 5000.0) < 0.01  # req-A processing_us
+        assert abs(y[idx_b] + y[n + idx_b] - 4000.0) < 0.01  # req-B processing_us
 
     def test_beta1_only_in_prefill_rows(self, data):
         """β₁ (prefill roofline) should only appear in rows from prefill steps."""
@@ -448,9 +464,9 @@ class TestFitCoefficientsEndToEnd:
             assert b >= 0, f"β{i+1} = {b} is negative"
 
     def test_beta1_prefill_roofline_positive(self, result):
-        """Primary success criterion: β₁ should now be > 0 with stacked formulation."""
-        assert result.betas[0] > 0, (
-            f"β₁ (prefill roofline) = {result.betas[0]}, expected > 0. "
+        """Primary success criterion: β₁ should be meaningfully positive with stacked formulation."""
+        assert result.betas[0] > 0.5, (
+            f"β₁ (prefill roofline) = {result.betas[0]}, expected > 0.5. "
             f"The stacked formulation should give prefill proper signal."
         )
 

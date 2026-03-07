@@ -58,6 +58,8 @@ class FittedCoefficients:
         len(betas) == 7.
         lambda_val >= 0.
         train_mse >= 0, val_mse >= 0.
+        train_mse and val_mse are computed on the stacked (2n,) system
+        (prefill + decode rows), not on per-request processing_us.
     """
     alpha_0: float
     alpha_1: float

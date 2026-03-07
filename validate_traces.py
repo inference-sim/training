@@ -1,4 +1,4 @@
-"""Validate journey trace data for all 16 experiments.
+"""Validate journey trace data for all active experiments.
 
 Parses each experiment's traces.json (JSONL, OTEL wire format) and validates
 every request's lifecycle against 5 correctness checks:
@@ -174,7 +174,7 @@ def _write_experiment_json(
 
 
 # ---------------------------------------------------------------------------
-# Main: run across all 16 experiments
+# Main: run across all active experiments
 # ---------------------------------------------------------------------------
 
 def main() -> int:

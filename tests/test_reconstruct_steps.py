@@ -575,3 +575,36 @@ class TestTimingDecomposition:
         # Prefill raw = 1002.3 - 1001.0 = 1.3s
         # Prefill processing = 0.8s = 800000 µs
         assert abs(prefill_preemption.prefill_processing_us - 800000.0) < 1.0
+
+    # --- Mixed preemption: both prefill and decode gaps in one request ---
+
+    @pytest.fixture()
+    def mixed_preemption(self):
+        """Preemption during both prefill and decode — gaps partitioned correctly."""
+        tl = (
+            JourneyBuilder("req-mixed", prompt_tokens=1000, max_output_tokens=200)
+            .queued(step=0, ts=1000.0)
+            .scheduled(step=10, ts=1001.0)
+            .preempted(step=11, ts=1001.5, prefill_done=600)
+            .scheduled(step=20, ts=1002.0, kind="RESUME")
+            .first_token(step=20, ts=1002.3)
+            .preempted(step=60, ts=1006.0, decode_done=40)
+            .scheduled(step=100, ts=1010.0, kind="RESUME")
+            .finished(step=259, ts=1025.0, decode_done=200)
+            .build()
+        )
+        _, labels = reconstruct_timelines([tl], max_num_batched_tokens=2048)
+        return labels[0]
+
+    def test_mixed_preemption_decomposition_sums_to_processing(self, mixed_preemption):
+        assert abs(mixed_preemption.prefill_processing_us + mixed_preemption.decode_processing_us - mixed_preemption.processing_us) < 1.0
+
+    def test_mixed_preemption_prefill_excludes_prefill_gap(self, mixed_preemption):
+        # Prefill gap = 1002.0 - 1001.5 = 0.5s
+        # Prefill raw = 1002.3 - 1001.0 = 1.3s → processing = 0.8s = 800000 µs
+        assert abs(mixed_preemption.prefill_processing_us - 800000.0) < 1.0
+
+    def test_mixed_preemption_decode_excludes_decode_gap(self, mixed_preemption):
+        # Decode gap = 1010.0 - 1006.0 = 4.0s
+        # Decode raw = 1025.0 - 1002.3 = 22.7s → processing = 18.7s = 18700000 µs
+        assert abs(mixed_preemption.decode_processing_us - 18700000.0) < 1.0

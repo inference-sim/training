@@ -16,7 +16,7 @@ python3 split.py                # print experiment summary
 
 ## Architecture
 
-- `split.py` is the **single source of truth** for experiment metadata. All modules import from it. Never hard-code experiment lists elsewhere. Validates its own integrity on import (5 assertions). 13 active experiments; 3 overload experiments (>10% failure) in `EXCLUDED_OVERLOAD`. Request-level splitting via `request_split()` (SHA-256 hash, 70/15/15 train/val/test).
+- `split.py` is the **single source of truth** for experiment metadata. All modules import from it. Never hard-code experiment lists elsewhere. Validates its own integrity on import (6 assertions). 13 active experiments; 3 overload experiments (>10% failure) in `EXCLUDED_OVERLOAD`. Request-level splitting via `request_split()` (SHA-256 hash, 70/15/15 train/val/test).
 - `trace_parser.py` provides shared OTEL parsing. Owns all knowledge of the JSONL/span nesting format.
 - `schemas.py` defines Pydantic schemas for all data file formats (traces, metrics, configs).
 - `reconstruct_steps.py` is the core module. `RequestLabel` includes `prefill_processing_us` and `decode_processing_us` (exact decomposition via FIRST_TOKEN boundary). Public API: `reconstruct_experiment()` (end-to-end) and `reconstruct_timelines()` (testable core, no filesystem).

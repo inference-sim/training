@@ -26,7 +26,7 @@ Overload Exclusion
 are excluded from the active dataset. The linear step-time model cannot
 capture nonlinear preemption cascade dynamics.
 
-Active dataset: 13 experiments, ~130K successful requests.
+Active dataset: 13 experiments, ~137K successful requests.
 """
 
 from __future__ import annotations
@@ -401,6 +401,7 @@ def _validate_split_integrity() -> None:
       3. Active + excluded = 16 total.
       4. Every excluded experiment has >10% failure rate.
       5. No overlap between EXPERIMENTS and EXCLUDED_OVERLOAD.
+      6. No active experiment has >10% failure rate.
     """
     # Check 1: no duplicates across both sets
     all_dirs = [e.dir_name for e in EXPERIMENTS] + [e.dir_name for e in EXCLUDED_OVERLOAD]
@@ -432,6 +433,13 @@ def _validate_split_integrity() -> None:
     assert active_dirs.isdisjoint(excluded_dirs), (
         f"Overlap between EXPERIMENTS and EXCLUDED_OVERLOAD: "
         f"{active_dirs & excluded_dirs}"
+    )
+
+    # Check 6: no active experiment is overloaded
+    for exp in EXPERIMENTS:
+        assert exp.failure_rate <= 0.10, (
+            f"Active experiment {exp.dir_name} has {exp.failure_rate:.0%} failure rate, "
+            f"should be in EXCLUDED_OVERLOAD"
     )
 
 

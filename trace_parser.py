@@ -83,6 +83,72 @@ def parse_journey_events(traces_path: Path | str) -> dict[str, list[dict]]:
     return dict(requests)
 
 
+def parse_api_events(traces_path: Path | str) -> dict[str, dict]:
+    """Parse traces.json and return API timestamps grouped by request ID.
+
+    Reads ``llm_request`` spans from the ``vllm.api`` scope and collects
+    ``api.ARRIVED`` and ``api.DEPARTED`` event timestamps keyed by
+    ``gen_ai.request.id``.
+
+    Requires: traces_path points to a valid traces.json file.
+    Guarantees: For every returned entry, departed_ts > arrived_ts > 0.
+
+    Note: API span request IDs do NOT have the sequence suffix (-0-xxx)
+    that llm_core spans have.  The timestamp attribute key is
+    ``event.ts.monotonic`` (not ``ts.monotonic`` like journey events).
+
+    Returns:
+        ``{base_request_id: {"arrived_ts": float, "departed_ts": float}}``
+    """
+    requests: dict[str, dict[str, float]] = {}
+
+    with open(traces_path) as f:
+        for line_num, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                batch = json.loads(line)
+            except json.JSONDecodeError as e:
+                warnings.warn(f"{traces_path}:{line_num}: skipping malformed JSON line: {e}")
+                continue
+            for rs in batch.get("resourceSpans", []):
+                for ss in rs.get("scopeSpans", []):
+                    if ss.get("scope", {}).get("name") != "vllm.api":
+                        continue
+                    for span in ss.get("spans", []):
+                        if span["name"] != "llm_request":
+                            continue
+                        request_id = None
+                        for a in span.get("attributes", []):
+                            if a["key"] == "gen_ai.request.id":
+                                request_id = a["value"].get("stringValue")
+                                break
+                        if request_id is None:
+                            continue
+
+                        ts_data: dict[str, float] = {}
+                        for ev in span.get("events", []):
+                            ev_attrs = attr_map(ev.get("attributes", []))
+                            ts_val = ev_attrs.get("event.ts.monotonic", 0.0)
+                            if ev["name"] == "api.ARRIVED":
+                                ts_data["arrived_ts"] = ts_val
+                            elif ev["name"] == "api.DEPARTED":
+                                ts_data["departed_ts"] = ts_val
+
+                        if "arrived_ts" in ts_data and "departed_ts" in ts_data:
+                            if ts_data["departed_ts"] > ts_data["arrived_ts"] > 0:
+                                requests[request_id] = ts_data
+                            else:
+                                warnings.warn(
+                                    f"Request {request_id}: invalid API timestamps "
+                                    f"arrived={ts_data['arrived_ts']}, "
+                                    f"departed={ts_data['departed_ts']}"
+                                )
+
+    return requests
+
+
 def load_exp_config(exp: ExperimentMeta) -> dict[str, Any]:
     """Load an experiment's exp-config.yaml as a plain dict.
 

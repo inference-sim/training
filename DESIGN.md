@@ -182,7 +182,7 @@ From `ReconstructedStep`: T_pf (total prefill tokens), T_dc (decode request coun
 
 ### Stage 4 — Coefficient fitting (`fit_coefficients.py`)
 
-**Planned.** Three-phase NNLS fitting.
+**Done.** Three-phase NNLS fitting.
 
 #### Phase 1: API processing overhead (α₀)
 

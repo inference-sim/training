@@ -25,7 +25,6 @@ from scipy.optimize import nnls
 
 from basis_functions import (
     HardwareSpec,
-    ModelArch,
     StepBasisValues,
     compute_experiment_basis,
     load_hardware_spec,

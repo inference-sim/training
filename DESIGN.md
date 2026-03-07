@@ -378,9 +378,9 @@ Evaluation targets (each component evaluated independently against its own signa
 
 Currently, these experiments are assigned to validate/test splits. Failed requests within them are filtered out by `build_feature_matrix()`, but their successful requests still participate in validation/test evaluation. **Planned change:** exclude these 3 experiments entirely. The linear step-time model cannot capture the nonlinear dynamics of overload (preemption cascades amplify latency non-linearly), and including them contaminates validation MSE (the mixtral-reasoning experiment alone contributes 7-second RMSE, dominating the validation signal).
 
-codellama-34b reasoning (0.08% failure, 4800 successful requests) is NOT overloaded — it is a long-request saturation regime where the model has sufficient capacity. It is retained.
+codellama-34b reasoning (0.08% failure, 4796 successful requests) is NOT overloaded — it is a long-request saturation regime where the model has sufficient capacity. It is retained.
 
-**Planned active dataset: 13 experiments, ~130K successful requests.**
+**Planned active dataset: 13 experiments, ~137K successful requests.**
 
 ## Data split
 

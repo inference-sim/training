@@ -257,3 +257,95 @@ class TestFitBetas:
                     f"β{i+1}: unreg={betas_unreg[i]:.2f}, reg={betas_reg[i]:.2f}, "
                     f"ratio={ratio:.2f}"
                 )
+
+
+class TestCollectAlphaData:
+    """Collect API/journey timestamp pairs across experiments for α fitting."""
+
+    @pytest.fixture()
+    def exp(self):
+        return get_train()[0]
+
+    def test_collect_alpha0_pairs_returns_valid_data(self, exp):
+        from fit_coefficients import collect_alpha_data
+
+        pairs_0, triples_12 = collect_alpha_data([exp])
+        assert len(pairs_0) > 0
+        for arrived, queued in pairs_0:
+            assert queued > arrived > 0
+
+    def test_collect_alpha12_triples_returns_valid_data(self, exp):
+        from fit_coefficients import collect_alpha_data
+
+        pairs_0, triples_12 = collect_alpha_data([exp])
+        assert len(triples_12) > 0
+        for departed, finished, n_tokens in triples_12:
+            assert departed > finished > 0
+            assert n_tokens > 0
+
+
+class TestTuneLambda:
+    """Grid search λ tuning on validation set."""
+
+    def test_selects_lambda_with_lowest_val_mse(self):
+        from fit_coefficients import tune_lambda
+
+        np.random.seed(42)
+        n_train, n_val = 200, 50
+        true_betas = np.array([2.0, 8.0, 1.5, 1.0, 20.0, 50.0, 500.0])
+        X_train = np.random.rand(n_train, 7) * 1000
+        y_train = X_train @ true_betas + np.random.normal(0, 100, n_train)
+        y_train = np.maximum(y_train, 0)
+        X_val = np.random.rand(n_val, 7) * 1000
+        y_val = X_val @ true_betas + np.random.normal(0, 100, n_val)
+        y_val = np.maximum(y_val, 0)
+
+        best_lambda, best_betas, train_mse, val_mse = tune_lambda(
+            X_train, y_train, X_val, y_val
+        )
+        assert best_lambda >= 0
+        assert len(best_betas) == 7
+        assert all(b >= 0 for b in best_betas)
+        assert train_mse >= 0
+        assert val_mse >= 0
+
+
+class TestFitCoefficientsEndToEnd:
+    """End-to-end fitting on real data."""
+
+    @pytest.fixture(scope="class")
+    def result(self):
+        from fit_coefficients import fit_coefficients
+        from basis_functions import load_hardware_spec
+
+        hw = load_hardware_spec("datasheets/h100-sxm.json")
+        return fit_coefficients(hw)
+
+    def test_alpha_0_in_expected_range(self, result):
+        assert result.alpha_0 > 0
+        assert 1000 < result.alpha_0 < 50000
+
+    def test_alpha_12_non_negative(self, result):
+        assert result.alpha_1 >= 0
+        assert result.alpha_2 >= 0
+
+    def test_alpha_2_in_expected_range(self, result):
+        assert result.alpha_2 < 100
+
+    def test_all_betas_non_negative(self, result):
+        assert len(result.betas) == 7
+        for i, b in enumerate(result.betas):
+            assert b >= 0, f"β{i+1} = {b} is negative"
+
+    def test_lambda_non_negative(self, result):
+        assert result.lambda_val >= 0
+
+    def test_mse_values_non_negative(self, result):
+        assert result.train_mse >= 0
+        assert result.val_mse >= 0
+
+    def test_returns_frozen_dataclass(self, result):
+        from fit_coefficients import FittedCoefficients
+        assert isinstance(result, FittedCoefficients)
+        with pytest.raises(AttributeError):
+            result.alpha_0 = 999  # type: ignore[misc]

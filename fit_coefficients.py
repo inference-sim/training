@@ -32,7 +32,6 @@ from basis_functions import (
     load_model_arch,
 )
 from reconstruct_steps import (
-    ExperimentReconstruction,
     ReconstructedStep,
     RequestLabel,
     reconstruct_experiment,
@@ -441,3 +440,112 @@ def fit_coefficients(hw: HardwareSpec) -> FittedCoefficients:
         train_mse=train_mse,
         val_mse=val_mse,
     )
+
+
+# =============================================================================
+# Diagnostics output
+# =============================================================================
+
+OUTPUT_DIR = Path("output/fit")
+
+
+def write_diagnostics(
+    coeffs: FittedCoefficients,
+    hw: HardwareSpec,
+) -> None:
+    """Write fitting diagnostics to output/fit/.
+
+    Requires: coeffs is a fitted FittedCoefficients, hw is the hardware spec used.
+    Guarantees: writes coefficients.json and prints summary to stdout.
+    """
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # JSON output
+    result = {
+        "alpha_0_us": coeffs.alpha_0,
+        "alpha_1_us": coeffs.alpha_1,
+        "alpha_2_us_per_token": coeffs.alpha_2,
+        "betas": list(coeffs.betas),
+        "lambda": coeffs.lambda_val,
+        "train_mse": coeffs.train_mse,
+        "val_mse": coeffs.val_mse,
+    }
+    with open(OUTPUT_DIR / "coefficients.json", "w") as f:
+        json.dump(result, f, indent=2)
+
+    # Lambda tuning curve
+    train_exps = get_train()
+    val_exps = get_validate()
+    X_train, y_train = _collect_beta_data(train_exps, hw)
+    X_val, y_val = _collect_beta_data(val_exps, hw)
+
+    tuning_curve: list[dict] = []
+    for lam in LAMBDA_GRID:
+        betas, _ = fit_betas(X_train, y_train, lambda_val=lam)
+        t_mse = float(np.mean((y_train - X_train @ betas) ** 2))
+        v_mse = float(np.mean((y_val - X_val @ betas) ** 2))
+        tuning_curve.append({"lambda": lam, "train_mse": t_mse, "val_mse": v_mse})
+
+    with open(OUTPUT_DIR / "lambda_tuning.json", "w") as f:
+        json.dump(tuning_curve, f, indent=2)
+
+    # Per-experiment residual summary
+    residuals: list[dict] = []
+    for exp in train_exps + val_exps:
+        rec = reconstruct_experiment(exp)
+        arch = load_model_arch(f"model_configs/{exp.config_json_dir}/config.json")
+        basis = compute_experiment_basis(rec, arch, hw, exp.tensor_parallelism)
+        X, y, _ = build_feature_matrix(rec.steps, basis, rec.labels)
+        if len(X) == 0:
+            continue
+        pred = X @ np.array(coeffs.betas)
+        resid = y - pred
+        residuals.append({
+            "experiment": exp.dir_name,
+            "split": exp.split.value,
+            "n_requests": len(y),
+            "mean_residual_us": float(np.mean(resid)),
+            "rmse_us": float(np.sqrt(np.mean(resid ** 2))),
+            "mean_y_us": float(np.mean(y)),
+        })
+
+    with open(OUTPUT_DIR / "residuals.json", "w") as f:
+        json.dump(residuals, f, indent=2)
+
+    # Print summary
+    print("=" * 60)
+    print("  Fitted Crossmodel Latency Parameters")
+    print("=" * 60)
+    print(f"\n  Phase 1 — API processing overhead:")
+    print(f"    α₀ = {coeffs.alpha_0:,.1f} µs ({coeffs.alpha_0/1000:.1f} ms)")
+    print(f"\n  Phase 2 — Post-decode overhead:")
+    print(f"    α₁ = {coeffs.alpha_1:,.1f} µs (fixed per-request)")
+    print(f"    α₂ = {coeffs.alpha_2:,.2f} µs/token (detokenization)")
+    print(f"\n  Phase 3 — GPU step-time model (λ = {coeffs.lambda_val}):")
+    beta_names = [
+        "prefill roofline", "decode roofline", "weight loading",
+        "TP communication", "per-layer overhead", "per-request scheduling",
+        "per-step overhead",
+    ]
+    for i, (b, name) in enumerate(zip(coeffs.betas, beta_names), 1):
+        lo, hi, _ = BETA_EXPECTED_RANGES[i]
+        flag = " ⚠" if b < lo or b > hi else ""
+        print(f"    β{i} = {b:>10.4f}  [{lo:>5.1f}, {hi:>6.1f}]  {name}{flag}")
+    print(f"\n  MSE:")
+    print(f"    Train:    {coeffs.train_mse:>14,.0f} µs²")
+    print(f"    Validate: {coeffs.val_mse:>14,.0f} µs²")
+    print(f"    RMSE:     {np.sqrt(coeffs.val_mse):>14,.0f} µs (validation)")
+    print(f"\n  Output written to {OUTPUT_DIR}/")
+    print("=" * 60)
+
+
+def main() -> int:
+    hw = load_hardware_spec("datasheets/h100-sxm.json")
+    coeffs = fit_coefficients(hw)
+    write_diagnostics(coeffs, hw)
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())

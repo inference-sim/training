@@ -10,6 +10,7 @@ Coefficient fitting pipeline for the inference-sim crossmodel latency model. Rec
 pytest                         # run tests (< 1s)
 python3 validate_traces.py      # validate all 16 experiments → output/validate/
 python3 reconstruct_steps.py    # reconstruct steps → output/reconstruct/
+python3 fit_coefficients.py     # fit 10 parameters → output/fit/
 python3 split.py                # print train/validate/test summary
 ```
 
@@ -20,9 +21,10 @@ python3 split.py                # print train/validate/test summary
 - `schemas.py` defines Pydantic schemas for all data file formats (traces, metrics, configs).
 - `reconstruct_steps.py` is the core module. Public API: `reconstruct_experiment()` (end-to-end) and `reconstruct_timelines()` (testable core, no filesystem).
 - `basis_functions.py` computes analytical roofline basis functions (µs) per step. Each basis function is a standalone pure function for extensibility. Public API: `compute_step_basis()` and `compute_experiment_basis()`.
+- `fit_coefficients.py` is the coefficient fitting module. Three-phase NNLS: α₀ (mean), α₁/α₂ (NNLS), β₁-β₇ (regularized NNLS with λ tuned on validation). Public API: `fit_coefficients(hw)` → `FittedCoefficients`.
 - `validate_traces.py` is independent verification. Does NOT import from `reconstruct_steps.py`.
 
-Output structure: `output/validate/<exp>.json` and `output/reconstruct/<exp>.json`, each with a `summary.json`.
+Output structure: `output/validate/<exp>.json`, `output/reconstruct/<exp>.json` (each with a `summary.json`), and `output/fit/coefficients.json`.
 
 ## Key invariants
 

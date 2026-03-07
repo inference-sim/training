@@ -10,37 +10,22 @@ every request's lifecycle against 5 correctness checks:
     5. Single-step prefill     — prefill completes within 1 scheduler step
 
 Exit code 1 if any experiment has >1% failure rate across all checks.
+Writes per-experiment JSON to output/validate/.
 """
 
 from __future__ import annotations
 
 import json
 import sys
-from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from split import EXPERIMENTS, ExperimentMeta
+from trace_parser import attr_map, parse_journey_events, traces_path_for
+
+OUTPUT_DIR = Path("output/validate")
 
 REQUIRED_EVENTS = ("journey.QUEUED", "journey.SCHEDULED", "journey.FIRST_TOKEN", "journey.FINISHED")
-
-# ---------------------------------------------------------------------------
-# Helpers to extract attributes from OTEL event dicts
-# ---------------------------------------------------------------------------
-
-def _attr_map(attributes: list[dict]) -> dict[str, object]:
-    """Convert OTEL attribute list to {key: python_value} dict."""
-    out: dict[str, object] = {}
-    for attr in attributes:
-        key = attr["key"]
-        val = attr["value"]
-        if "doubleValue" in val:
-            out[key] = val["doubleValue"]
-        elif "intValue" in val:
-            out[key] = int(val["intValue"])
-        elif "stringValue" in val:
-            out[key] = val["stringValue"]
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +54,7 @@ def validate_request(request_id: str, events: list[dict]) -> RequestResult:
     parsed = []
     for ev in events:
         name = ev["name"]
-        attrs = _attr_map(ev.get("attributes", []))
+        attrs = attr_map(ev.get("attributes", []))
         parsed.append((name, attrs))
 
     event_names = [name for name, _ in parsed]
@@ -157,32 +142,8 @@ def validate_request(request_id: str, events: list[dict]) -> RequestResult:
 
 def validate_experiment(exp: ExperimentMeta) -> tuple[int, list[RequestResult]]:
     """Validate all requests in one experiment. Returns (total_requests, failures)."""
-    traces_path = Path("default_args") / exp.dir_name / "traces.json"
+    requests = parse_journey_events(traces_path_for(exp))
 
-    # Collect events per request_id from llm_core spans
-    requests: dict[str, list[dict]] = defaultdict(list)
-
-    with open(traces_path) as f:
-        for line in f:
-            batch = json.loads(line)
-            for rs in batch.get("resourceSpans", []):
-                for ss in rs.get("scopeSpans", []):
-                    if ss.get("scope", {}).get("name") != "vllm.scheduler":
-                        continue
-                    for span in ss.get("spans", []):
-                        if span["name"] != "llm_core":
-                            continue
-                        # Extract request_id from span attributes
-                        request_id = None
-                        for attr in span.get("attributes", []):
-                            if attr["key"] == "gen_ai.request.id":
-                                request_id = attr["value"]["stringValue"]
-                                break
-                        if request_id is None:
-                            continue
-                        requests[request_id].extend(span.get("events", []))
-
-    # Validate each request
     failures: list[RequestResult] = []
     for req_id, events in requests.items():
         result = validate_request(req_id, events)
@@ -192,16 +153,39 @@ def validate_experiment(exp: ExperimentMeta) -> tuple[int, list[RequestResult]]:
     return len(requests), failures
 
 
+def _write_experiment_json(
+    exp: ExperimentMeta, total: int, failures: list[RequestResult],
+) -> None:
+    """Write per-experiment validation result as JSON."""
+    record = {
+        "experiment": exp.dir_name,
+        "split": exp.split.value,
+        "total_requests": total,
+        "expected_requests": exp.num_total,
+        "failed_requests": len(failures),
+        "failure_rate": len(failures) / total if total > 0 else 0.0,
+        "failures": [
+            {"request_id": r.request_id, "checks": r.failures}
+            for r in failures
+        ],
+    }
+    out_path = OUTPUT_DIR / f"{exp.dir_name}.json"
+    with open(out_path, "w") as f:
+        json.dump(record, f, indent=2)
+
+
 # ---------------------------------------------------------------------------
 # Main: run across all 16 experiments
 # ---------------------------------------------------------------------------
 
 def main() -> int:
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
     any_over_threshold = False
     total_requests_all = 0
     total_failures_all = 0
+    summary_rows: list[dict] = []
 
-    # Column widths for summary table
     print(f"{'Experiment':<58} {'Split':<10} {'Requests':>8} {'Expected':>8} {'Fail':>6} {'Rate':>7}")
     print("─" * 103)
 
@@ -214,7 +198,6 @@ def main() -> int:
         total_requests_all += total
         total_failures_all += n_fail
 
-        # Request count sanity check
         count_flag = "" if total == expected else f"  ⚠ expected {expected}"
 
         print(
@@ -225,7 +208,6 @@ def main() -> int:
         if rate > 0.01:
             any_over_threshold = True
 
-        # Print per-request failure details (max 10 per experiment)
         if failures:
             shown = failures[:10]
             for r in shown:
@@ -234,6 +216,17 @@ def main() -> int:
             if len(failures) > 10:
                 print(f"    ... and {len(failures) - 10} more failed requests")
 
+        _write_experiment_json(exp, total, failures)
+
+        summary_rows.append({
+            "experiment": exp.dir_name,
+            "split": exp.split.value,
+            "total_requests": total,
+            "expected_requests": expected,
+            "failed_requests": n_fail,
+            "failure_rate": rate,
+        })
+
     print("─" * 103)
     print(
         f"{'TOTAL':<58} {'':<10} {total_requests_all:>8,} "
@@ -241,6 +234,18 @@ def main() -> int:
         f"{total_failures_all:>6} "
         f"{total_failures_all / total_requests_all if total_requests_all else 0:>6.2%}"
     )
+
+    # Write summary JSON
+    summary = {
+        "total_requests": total_requests_all,
+        "total_expected": sum(e.num_total for e in EXPERIMENTS),
+        "total_failures": total_failures_all,
+        "overall_failure_rate": total_failures_all / total_requests_all if total_requests_all else 0.0,
+        "passed": not any_over_threshold,
+        "experiments": summary_rows,
+    }
+    with open(OUTPUT_DIR / "summary.json", "w") as f:
+        json.dump(summary, f, indent=2)
 
     if any_over_threshold:
         print("\nFAILED: One or more experiments exceed 1% failure rate.")

@@ -35,5 +35,8 @@ default_args/*/results/stderr.log
 # Box notes (not versioned)
 *.boxnote
 
+# Generated output
+output/
+
 # instrumented vllm code
 vllm

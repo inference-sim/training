@@ -5,6 +5,7 @@ description = "Training data and utilities for the inference-sim latency predict
 requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -12,3 +13,6 @@ dev = [
     "ruff",
     "pytest",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

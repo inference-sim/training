@@ -253,22 +253,24 @@ Separating the objective into `MSE(prefill_time) + MSE(decode_time)` gives prefi
 For each non-failed request r, compute two feature vectors by summing per-step basis values over the steps where r appears in prefill vs. decode:
 
 ```
-X_pf(r) = [Σ max(t_pf_compute, t_pf_kv),   # β₁   (summed over prefill steps of r)
-            Σ max(t_dc_compute, t_dc_kv),   # β₂
-            Σ t_weight,                       # β₃
+X_pf(r) = [Σ max(t_pf_compute, t_pf_kv),   # β₁   (prefill roofline, from prefill entries only)
+            0,                               # β₂   (decode roofline — not accumulated for prefill)
+            Σ t_weight,                       # β₃   (shared, summed over prefill steps of r)
             Σ t_tp,                           # β₄
             Σ L,                              # β₅
             Σ batch_size,                     # β₆
             num_prefill_steps]               # β₇
 
-X_dc(r) = [Σ max(t_pf_compute, t_pf_kv),   # β₁   (summed over decode steps of r)
-            Σ max(t_dc_compute, t_dc_kv),   # β₂
-            Σ t_weight,                       # β₃
+X_dc(r) = [0,                               # β₁   (prefill roofline — not accumulated for decode)
+            Σ max(t_dc_compute, t_dc_kv),   # β₂   (decode roofline, from decode entries only)
+            Σ t_weight,                       # β₃   (shared, summed over decode steps of r)
             Σ t_tp,                           # β₄
             Σ L,                              # β₅
             Σ batch_size,                     # β₆
             num_decode_steps]                # β₇
 ```
+
+Note: β₁ and β₂ use **selective accumulation** — prefill entries only accumulate β₁ (prefill roofline), decode entries only accumulate β₂ (decode roofline). This matches the original `build_feature_matrix` semantics and preserves the sum invariant. The shared columns β₃-β₇ are accumulated by any entry in the step.
 
 The stacked system solves a single NNLS problem:
 
@@ -286,10 +288,9 @@ minimize ||X_stacked · β − y_stacked||² + λ · Σᵢ₌₁⁴ (βᵢ − 1
 All 7 β coefficients are **shared** between the prefill and decode rows. This is physically correct: weight loading, TP communication, per-layer overhead, and scheduling costs are properties of the step, not of whether the step is doing prefill or decode.
 
 **Key properties of the stacked formulation:**
-- In pure-prefill steps: `max(t_dc_compute, t_dc_kv) = 0`, so β₂ gets no signal from those rows. β₁ gets signal.
-- In pure-decode steps: `max(t_pf_compute, t_pf_kv) = 0`, so β₁ gets no signal from those rows. β₂ gets signal.
-- In mixed steps (prefill + decode in same step): both β₁ and β₂ get signal. The step's full duration is attributed to both the prefilling and decoding request.
-- β₃–β₇ are shared: the same weight-loading correction applies regardless of step type.
+- β₁ (prefill roofline) is accumulated ONLY by prefill entries. β₂ (decode roofline) is accumulated ONLY by decode entries. This selective accumulation matches the original single-row formulation.
+- In mixed steps (prefill + decode in same step): the prefilling request accumulates β₁ and the shared β₃-β₇; the decoding request accumulates β₂ and the shared β₃-β₇. Both see the same step's shared overhead (weight loading, TP comm, per-layer, scheduling).
+- β₃–β₇ are shared: accumulated by any entry (prefill or decode) in each step.
 
 **Invariant:** `X_pf(r) + X_dc(r) = X_total(r)` where `X_total` is the original single-row feature vector. This ensures the stacked formulation is a refinement, not a redefinition, of the original model.
 

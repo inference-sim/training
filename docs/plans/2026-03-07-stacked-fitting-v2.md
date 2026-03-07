@@ -48,22 +48,33 @@ Keep `get_by_model()`, `get_by_profile()`, `experiment_dir()`, `config_json_path
 
 Add `get_active() -> list[ExperimentMeta]` that returns all experiments in `EXPERIMENTS` (for code that needs to iterate all active experiments).
 
-**Step 2: Run existing tests**
+**Step 2: Fix `exp.split.value` references in other modules**
 
-Run: `python3 -m pytest tests/test_reconstruct_steps.py tests/test_basis_functions.py -v`
-Expected: All pass (these don't depend on split assignments)
+After removing the `split` field from `ExperimentMeta`, these files will break:
+- `reconstruct_steps.py` lines 596, 653, 662 — `_write_experiment_json` and main block use `exp.split.value`
+- `validate_traces.py` lines 162, 204, 223 — validation output uses `exp.split.value`
+- `tests/test_trace_parser_api.py` line 12 — imports `get_train`
+- `tests/test_fit_coefficients.py` — imports `get_train`
+
+Fix `reconstruct_steps.py` and `validate_traces.py`: replace `exp.split.value` with a static string like `"active"` or remove the split field from JSON output entirely (since all experiments are now active).
+
+Fix `tests/test_trace_parser_api.py`: replace `from split import get_train` with `from split import get_active` and use `get_active()[0]` instead of `get_train()[0]`.
+
+Leave `tests/test_fit_coefficients.py` broken for now — it gets fully rewritten in Task 5.
+
+**Step 3: Run existing tests**
+
+Run: `python3 -m pytest tests/test_reconstruct_steps.py tests/test_basis_functions.py tests/test_trace_parser_api.py -v`
+Expected: All pass
 
 Run: `python3 -m pytest tests/test_fit_coefficients.py -v`
 Expected: Some tests FAIL because they import `get_train` which no longer exists. This is expected — we'll fix in Task 5.
 
-Run: `python3 -m pytest tests/test_trace_parser_api.py -v`
-Expected: Fails because it imports `get_train`. Expected — fix in Task 5.
-
-**Step 3: Commit**
+**Step 4: Commit**
 
 ```bash
-git add split.py
-git -c commit.gpgsign=false commit -m "refactor: exclude 3 overload experiments, remove experiment-level split
+git add split.py reconstruct_steps.py validate_traces.py tests/test_trace_parser_api.py
+git commit -m "refactor: exclude 3 overload experiments, remove experiment-level split
 
 Removes Split enum and split field from ExperimentMeta. Moves 3 overload
 experiments (>10% failure) to EXCLUDED_OVERLOAD. Remaining 13 experiments
@@ -201,7 +212,7 @@ Expected: All 6 tests PASS
 
 ```bash
 git add split.py tests/test_split.py
-git -c commit.gpgsign=false commit -m "feat: add request_split() for deterministic request-level splitting
+git commit -m "feat: add request_split() for deterministic request-level splitting
 
 SHA-256 hash mod 100, ratio 70/15/15 train/validate/test.
 Deterministic and platform-independent.
@@ -223,52 +234,90 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 
 **Step 1: Write the failing tests**
 
-Add to `tests/test_reconstruct_steps.py`. These go inside the EXISTING test classes that already test preemption, adding new assertions on the new fields.
-
-In `TestSimpleRequest` (the no-preemption baseline, currently around line ~35):
+Create a NEW test class `TestTimingDecomposition` in `tests/test_reconstruct_steps.py`. Per CLAUDE.md BDD rule 4, each test class is a scenario — timing decomposition is a distinct behavioral concern from preemption or batch composition.
 
 ```python
-def test_prefill_decode_decomposition_sums_to_processing(self, result):
-    _, labels = result
-    label = labels[0]
-    assert abs(label.prefill_processing_us + label.decode_processing_us - label.processing_us) < 1.0
+class TestTimingDecomposition:
+    """Timing decomposition splits processing_us into prefill and decode.
 
-def test_prefill_processing_is_positive(self, result):
-    _, labels = result
-    label = labels[0]
-    assert label.prefill_processing_us > 0
+    The boundary is FIRST_TOKEN.ts. Preemption gaps before FIRST_TOKEN
+    are prefill gaps; after are decode gaps. The invariant
+    prefill_processing_us + decode_processing_us == processing_us holds exactly.
+    """
 
-def test_decode_processing_is_positive(self, result):
-    _, labels = result
-    label = labels[0]
-    assert label.decode_processing_us > 0
-```
+    @pytest.fixture()
+    def simple(self):
+        """No preemption — baseline decomposition."""
+        tl = (
+            JourneyBuilder("req-simple", prompt_tokens=512, max_output_tokens=100)
+            .queued(step=0, ts=1000.0)
+            .scheduled(step=5, ts=1001.0)
+            .first_token(step=5, ts=1001.2)
+            .finished(step=104, ts=1010.0, decode_done=100)
+            .build()
+        )
+        _, labels = reconstruct_timelines([tl], max_num_batched_tokens=2048)
+        return labels[0]
 
-In `TestDecodePreemption` (single decode preemption, around line ~93):
+    @pytest.fixture()
+    def decode_preemption(self):
+        """Preemption during decode — all gap is decode gap."""
+        tl = (
+            JourneyBuilder("req-dc-pre", prompt_tokens=100, max_output_tokens=200)
+            .queued(step=0, ts=1000.0)
+            .scheduled(step=10, ts=1001.0)
+            .first_token(step=10, ts=1001.1)
+            .preempted(step=60, ts=1006.0, decode_done=50)
+            .scheduled(step=100, ts=1010.0, kind="RESUME")
+            .finished(step=249, ts=1025.0, decode_done=200)
+            .build()
+        )
+        _, labels = reconstruct_timelines([tl], max_num_batched_tokens=2048)
+        return labels[0]
 
-```python
-def test_prefill_decode_decomposition_with_decode_preemption(self, result):
-    _, labels = result
-    label = labels[0]
-    # Decomposition invariant still holds
-    assert abs(label.prefill_processing_us + label.decode_processing_us - label.processing_us) < 1.0
-    # The preemption gap is entirely in decode, so prefill time is just FIRST_TOKEN - SCHEDULED
-    prefill_expected = (1001.1 - 1001.0) * 1e6  # 0.1s = 100000 µs
-    assert abs(label.prefill_processing_us - prefill_expected) < 1.0
-```
+    @pytest.fixture()
+    def prefill_preemption(self):
+        """Preemption during prefill — gap is prefill gap."""
+        tl = (
+            JourneyBuilder("req-pf-pre", prompt_tokens=1000, max_output_tokens=50)
+            .queued(step=0, ts=1000.0)
+            .scheduled(step=10, ts=1001.0)
+            .preempted(step=11, ts=1001.5, prefill_done=600)
+            .scheduled(step=20, ts=1002.0, kind="RESUME")
+            .first_token(step=20, ts=1002.3)
+            .finished(step=69, ts=1005.0, decode_done=50)
+            .build()
+        )
+        _, labels = reconstruct_timelines([tl], max_num_batched_tokens=2048)
+        return labels[0]
 
-In `TestPrefillPreemption` (prefill preemption, around line ~151):
+    # --- Invariant: prefill + decode = processing (must hold for all scenarios) ---
 
-```python
-def test_prefill_decode_decomposition_with_prefill_preemption(self, result):
-    _, labels = result
-    label = labels[0]
-    # Decomposition invariant
-    assert abs(label.prefill_processing_us + label.decode_processing_us - label.processing_us) < 1.0
-    # Prefill gap = RESUME.ts - PREEMPTED.ts = 1002.0 - 1001.5 = 0.5s
-    # Prefill raw = FIRST_TOKEN.ts - SCHEDULED.ts = 1002.3 - 1001.0 = 1.3s
-    # Prefill processing = 1.3 - 0.5 = 0.8s = 800000 µs
-    assert abs(label.prefill_processing_us - 800000.0) < 1.0
+    def test_simple_decomposition_sums_to_processing(self, simple):
+        assert abs(simple.prefill_processing_us + simple.decode_processing_us - simple.processing_us) < 1.0
+
+    def test_decode_preemption_decomposition_sums_to_processing(self, decode_preemption):
+        assert abs(decode_preemption.prefill_processing_us + decode_preemption.decode_processing_us - decode_preemption.processing_us) < 1.0
+
+    def test_prefill_preemption_decomposition_sums_to_processing(self, prefill_preemption):
+        assert abs(prefill_preemption.prefill_processing_us + prefill_preemption.decode_processing_us - prefill_preemption.processing_us) < 1.0
+
+    # --- Specific values ---
+
+    def test_simple_both_components_positive(self, simple):
+        assert simple.prefill_processing_us > 0
+        assert simple.decode_processing_us > 0
+
+    def test_decode_preemption_prefill_time_excludes_gap(self, decode_preemption):
+        # Preemption is after FIRST_TOKEN → all gap is decode, prefill unaffected
+        prefill_expected = (1001.1 - 1001.0) * 1e6  # 100000 µs
+        assert abs(decode_preemption.prefill_processing_us - prefill_expected) < 1.0
+
+    def test_prefill_preemption_prefill_time_excludes_gap(self, prefill_preemption):
+        # Prefill gap = 1002.0 - 1001.5 = 0.5s
+        # Prefill raw = 1002.3 - 1001.0 = 1.3s
+        # Prefill processing = 0.8s = 800000 µs
+        assert abs(prefill_preemption.prefill_processing_us - 800000.0) < 1.0
 ```
 
 **Step 2: Run tests to verify they fail**
@@ -393,7 +442,7 @@ Expected: All PASS (no dependency on RequestLabel fields)
 
 ```bash
 git add reconstruct_steps.py tests/test_reconstruct_steps.py
-git -c commit.gpgsign=false commit -m "feat: decompose processing_us into prefill + decode components
+git commit -m "feat: decompose processing_us into prefill + decode components
 
 Adds prefill_processing_us and decode_processing_us to RequestLabel.
 Preemption gaps partitioned by FIRST_TOKEN.ts boundary.
@@ -488,8 +537,10 @@ def build_stacked_feature_matrix(
             rid = entry.request_id
             if rid not in pf_features:
                 continue
+            # β₁ (prefill roofline) — only from prefill entries
             pf_features[rid][0] += max(bv.t_pf_compute, bv.t_pf_kv)
-            pf_features[rid][1] += max(bv.t_dc_compute, bv.t_dc_kv)
+            # β₂ (decode roofline) — NOT accumulated for prefill entries
+            # Shared β₃-β₇
             pf_features[rid][2] += bv.t_weight
             pf_features[rid][3] += bv.t_tp
             pf_features[rid][4] += bv.num_layers
@@ -500,8 +551,10 @@ def build_stacked_feature_matrix(
             rid = entry.request_id
             if rid not in dc_features:
                 continue
-            dc_features[rid][0] += max(bv.t_pf_compute, bv.t_pf_kv)
+            # β₁ (prefill roofline) — NOT accumulated for decode entries
+            # β₂ (decode roofline) — only from decode entries
             dc_features[rid][1] += max(bv.t_dc_compute, bv.t_dc_kv)
+            # Shared β₃-β₇
             dc_features[rid][2] += bv.t_weight
             dc_features[rid][3] += bv.t_tp
             dc_features[rid][4] += bv.num_layers
@@ -675,20 +728,85 @@ Update the diagnostics to report α₀ MSE, α₁/α₂ MSE, and GPU processing 
 
 The residuals loop should also compute per-experiment prefill and decode RMSE separately.
 
-**Step 7: Run tests, fix what breaks, commit**
+**Step 7: Write concrete tests for stacked feature matrix**
 
-Many tests in `tests/test_fit_coefficients.py` will need updating:
-- `TestBuildFeatureMatrix` → rename/update for `build_stacked_feature_matrix` (shape is now `(2*n, 7)`)
+Replace `TestBuildFeatureMatrix` with `TestStackedFeatureMatrix` in `tests/test_fit_coefficients.py`. Key test methods:
+
+```python
+class TestStackedFeatureMatrix:
+    """Stacked prefill+decode feature matrix for Phase 3 regression.
+
+    Each non-failed request produces two rows: one for prefill steps,
+    one for decode steps. Shared β₃-β₇, selective β₁/β₂.
+    """
+
+    @pytest.fixture()
+    def data(self):
+        # Same fixture as before but with prefill/decode processing fields
+        steps = [...]  # same 2-step fixture
+        basis_values = [...]  # same basis values
+        labels = [
+            RequestLabel("req-A", ..., processing_us=5000.0,
+                         prefill_processing_us=500.0, decode_processing_us=4500.0, ...),
+            RequestLabel("req-B", ..., processing_us=4000.0,
+                         prefill_processing_us=0.0, decode_processing_us=4000.0, ...),
+        ]
+        return steps, basis_values, labels
+
+    def test_stacked_shape_is_2n_by_7(self, data):
+        X, y, req_ids = build_stacked_feature_matrix(*data)
+        n = len(req_ids)
+        assert X.shape == (2 * n, 7)
+        assert y.shape == (2 * n,)
+
+    def test_prefill_rows_target_prefill_processing_us(self, data):
+        X, y, req_ids = build_stacked_feature_matrix(*data)
+        n = len(req_ids)
+        idx_a = req_ids.index("req-A")
+        assert abs(y[idx_a] - 500.0) < 0.01  # prefill target
+        assert abs(y[n + idx_a] - 4500.0) < 0.01  # decode target
+
+    def test_feature_sum_invariant(self, data):
+        """X_pf[i] + X_dc[i] equals what the old single-row formulation produced."""
+        X, y, req_ids = build_stacked_feature_matrix(*data)
+        n = len(req_ids)
+        for i in range(n):
+            X_total = X[i] + X[n + i]  # prefill row + decode row
+            # Should equal the original single-row feature vector
+            # (since selective accumulation is preserved)
+            assert all(X_total[j] >= 0 for j in range(7))
+
+    def test_beta1_only_in_prefill_rows(self, data):
+        """β₁ (prefill roofline) should only appear in rows from prefill steps."""
+        X, y, req_ids = build_stacked_feature_matrix(*data)
+        n = len(req_ids)
+        idx_b = req_ids.index("req-B")
+        # req-B has no prefill steps → β₁ column is 0 in prefill row
+        assert X[idx_b, 0] == 0.0
+        # req-B decode row also has β₁ = 0 (decode entries don't accumulate β₁)
+        assert X[n + idx_b, 0] == 0.0
+
+    def test_beta2_only_in_decode_rows(self, data):
+        """β₂ (decode roofline) should only appear in rows from decode steps."""
+        X, y, req_ids = build_stacked_feature_matrix(*data)
+        n = len(req_ids)
+        idx_a = req_ids.index("req-A")
+        # req-A prefill row: β₂ = 0 (prefill entries don't accumulate β₂)
+        assert X[idx_a, 1] == 0.0
+```
+
+Also update:
 - `TestCollectAlphaData` → `collect_alpha_data()` now takes no arguments
 - `TestFitCoefficientsEndToEnd` → uses new split functions
 - All `RequestLabel` constructions in test fixtures need the two new fields
+- **Add `assert result.betas[0] > 0` to `TestFitCoefficientsEndToEnd`** — this is the primary success criterion for the entire refactor
 
 Run: `python3 -m pytest -q`
 Expected: All tests pass (94 → probably ~95+ after new stacked tests)
 
 ```bash
 git add fit_coefficients.py tests/test_fit_coefficients.py
-git -c commit.gpgsign=false commit -m "feat: stacked prefill/decode NNLS with request-level splitting
+git commit -m "feat: stacked prefill/decode NNLS with request-level splitting
 
 Replaces single-target processing_us regression with stacked system:
 - Prefill rows: target = prefill_processing_us
@@ -743,7 +861,7 @@ Expected: All pass
 
 ```bash
 git add tests/
-git -c commit.gpgsign=false commit -m "fix: update test fixtures for new RequestLabel fields and split API
+git commit -m "fix: update test fixtures for new RequestLabel fields and split API
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 ```
@@ -774,7 +892,7 @@ Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 
 ```bash
 git add CLAUDE.md DESIGN.md
-git -c commit.gpgsign=false commit -m "docs: update CLAUDE.md and DESIGN.md for stacked fitting v2
+git commit -m "docs: update CLAUDE.md and DESIGN.md for stacked fitting v2
 
 Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>"
 ```
@@ -812,23 +930,21 @@ No code changes needed unless something is wrong.
 ## Task dependency graph
 
 ```
-Task 1 (overload exclusion)
-  └─► Task 2 (request_split)
-        └─► Task 3 (timing decomposition) [independent of 1-2, but easier after]
-              └─► Task 4 (verify conftest.py)
-                    └─► Task 5 (stacked formulation — the big one)
-                          └─► Task 6 (update test fixtures)
-                                └─► Task 7 (update docs)
-                                      └─► Task 8 (run and verify)
+Task 1 (overload exclusion) ─► Task 2 (request_split) ─┐
+                                                        ├─► Task 5 (stacked formulation)
+Task 3 (timing decomposition) ─► Task 4 (conftest.py) ─┘        │
+                                                          Task 6 (test fixtures)
+                                                                 │
+                                                          Task 7 (docs)
+                                                                 │
+                                                          Task 8 (run & verify)
 ```
 
-Tasks 1-2 and Task 3 are independent and could be done in parallel. Task 5 depends on all three.
+Tasks 1-2 and Tasks 3-4 are **independent parallel branches** that merge at Task 5.
 
 ## Important notes for the implementer
 
-1. **Use `git -c commit.gpgsign=false commit`** for all commits (GPG signing hangs in this environment).
-
-2. **The `split` field on `ExperimentMeta`** is referenced throughout the codebase. After removing it in Task 1, several files will have import errors. That's expected — fix them as you go in Tasks 5-6. The `reconstruct_steps.py` main function uses `exp.split.value` for JSON output — that needs updating too.
+1. **The `split` field on `ExperimentMeta`** is referenced throughout the codebase. After removing it in Task 1, fix all references immediately (reconstruct_steps.py, validate_traces.py, test_trace_parser_api.py — see Task 1 Step 2).
 
 3. **`reconstruct_experiment()` constructs failed RequestLabels** directly (line 566-570). These need the two new fields (both 0.0). Don't forget this.
 

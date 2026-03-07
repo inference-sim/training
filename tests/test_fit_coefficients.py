@@ -47,6 +47,21 @@ class TestEstimateAlpha0:
         alpha_0 = estimate_alpha_0(pairs)
         assert abs(alpha_0 - 10000.0) < 0.1
 
+    def test_alpha0_raises_on_empty_input(self):
+        from fit_coefficients import estimate_alpha_0
+
+        with pytest.raises(ValueError, match="No arrived/queued pairs"):
+            estimate_alpha_0([])
+
+    def test_alpha0_warns_on_non_positive(self):
+        from fit_coefficients import estimate_alpha_0
+
+        # queued < arrived -> negative difference
+        pairs = [(100.010, 100.000), (200.010, 200.000)]
+        with pytest.warns(UserWarning, match="non-positive"):
+            alpha_0 = estimate_alpha_0(pairs)
+        assert alpha_0 < 0
+
 
 class TestFitAlpha12:
     """Phase 2: NNLS fit of α₁ + α₂·output_tokens."""
@@ -178,6 +193,32 @@ class TestBuildFeatureMatrix:
         assert "req-C" not in req_ids
         assert X.shape[0] == 2
 
+    def test_all_failed_returns_correctly_shaped_empty(self):
+        from fit_coefficients import build_feature_matrix
+
+        steps = [
+            ReconstructedStep(
+                step_id=1, prefill_reqs=(), decode_reqs=(),
+                total_prefill_tokens=0, total_decode_tokens=0, batch_size=0,
+            ),
+        ]
+        basis_values = [
+            StepBasisValues(
+                step_id=1, t_pf_compute=0, t_pf_kv=0,
+                t_dc_compute=0, t_dc_kv=0,
+                t_weight=0, t_tp=0, num_layers=32, batch_size=0,
+            ),
+        ]
+        labels = [
+            RequestLabel("req-X", prompt_tokens=100, output_tokens=0,
+                         queueing_us=0, ttft_us=0, processing_us=0, e2e_us=0,
+                         num_preemptions=0, failed=True, first_step=0, last_step=0),
+        ]
+        X, y, req_ids = build_feature_matrix(steps, basis_values, labels)
+        assert X.shape == (0, 7)
+        assert y.shape == (0,)
+        assert req_ids == []
+
 
 class TestFitBetas:
     """Phase 3: regularized NNLS fit of β₁–β₇."""
@@ -257,6 +298,48 @@ class TestFitBetas:
                     f"β{i+1}: unreg={betas_unreg[i]:.2f}, reg={betas_reg[i]:.2f}, "
                     f"ratio={ratio:.2f}"
                 )
+
+    def test_rejects_wrong_feature_count(self):
+        from fit_coefficients import fit_betas
+
+        X = np.random.rand(10, 5)
+        y = np.random.rand(10)
+        with pytest.raises(ValueError, match="Expected 7 features"):
+            fit_betas(X, y, lambda_val=0.0)
+
+
+class TestFittedCoefficientsValidation:
+    """FittedCoefficients enforces invariants at construction time."""
+
+    def test_rejects_wrong_betas_length(self):
+        from fit_coefficients import FittedCoefficients
+
+        with pytest.raises(ValueError, match="exactly 7 elements"):
+            FittedCoefficients(
+                alpha_0=1.0, alpha_1=1.0, alpha_2=1.0,
+                betas=(1.0, 2.0), lambda_val=0.0,
+                train_mse=0.0, val_mse=0.0,
+            )
+
+    def test_rejects_negative_alpha(self):
+        from fit_coefficients import FittedCoefficients
+
+        with pytest.raises(ValueError, match="alpha_0 must be >= 0"):
+            FittedCoefficients(
+                alpha_0=-1.0, alpha_1=0.0, alpha_2=0.0,
+                betas=(1.0,) * 7, lambda_val=0.0,
+                train_mse=0.0, val_mse=0.0,
+            )
+
+    def test_rejects_negative_beta(self):
+        from fit_coefficients import FittedCoefficients
+
+        with pytest.raises(ValueError, match="All betas must be >= 0"):
+            FittedCoefficients(
+                alpha_0=0.0, alpha_1=0.0, alpha_2=0.0,
+                betas=(1.0, -0.5, 1.0, 1.0, 1.0, 1.0, 1.0),
+                lambda_val=0.0, train_mse=0.0, val_mse=0.0,
+            )
 
 
 class TestCollectAlphaData:

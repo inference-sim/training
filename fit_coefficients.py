@@ -67,6 +67,15 @@ class FittedCoefficients:
     train_mse: float
     val_mse: float
 
+    def __post_init__(self) -> None:
+        if len(self.betas) != 7:
+            raise ValueError(f"betas must have exactly 7 elements, got {len(self.betas)}")
+        for name in ("alpha_0", "alpha_1", "alpha_2", "lambda_val", "train_mse", "val_mse"):
+            if getattr(self, name) < 0:
+                raise ValueError(f"FittedCoefficients.{name} must be >= 0, got {getattr(self, name)!r}")
+        if any(b < 0 for b in self.betas):
+            raise ValueError(f"All betas must be >= 0, got {self.betas}")
+
 
 # =============================================================================
 # Phase 1: Estimate α₀
@@ -75,9 +84,9 @@ class FittedCoefficients:
 def estimate_alpha_0(arrived_queued_pairs: list[tuple[float, float]]) -> float:
     """Estimate API processing overhead as mean(QUEUED.ts − ARRIVED.ts).
 
-    Requires: arrived_queued_pairs is a list of (arrived_ts, queued_ts) in seconds.
+    Requires: arrived_queued_pairs is a non-empty list of (arrived_ts, queued_ts) in seconds.
               Each queued_ts > arrived_ts.
-    Guarantees: returns α₀ in microseconds, α₀ > 0.
+    Guarantees: returns α₀ in microseconds. Warns if α₀ <= 0 (unexpected data).
     """
     if not arrived_queued_pairs:
         raise ValueError("No arrived/queued pairs provided")
@@ -174,6 +183,8 @@ def build_feature_matrix(
         X_rows.append(feat)
         y_list.append(label_map[rid].processing_us)
 
+    if not X_rows:
+        return np.empty((0, 7), dtype=np.float64), np.empty(0, dtype=np.float64), []
     X = np.array(X_rows, dtype=np.float64)
     y = np.array(y_list, dtype=np.float64)
     return X, y, req_ids
@@ -200,7 +211,8 @@ def fit_betas(
     Guarantees: all β >= 0. Returns (betas, residual_norm).
     """
     n_features = X.shape[1]
-    assert n_features == 7, f"Expected 7 features, got {n_features}"
+    if n_features != 7:
+        raise ValueError(f"Expected 7 features, got {n_features}")
 
     if lambda_val > 0:
         sqrt_lam = np.sqrt(lambda_val)
@@ -376,6 +388,11 @@ def _collect_beta_data(
             all_X.append(X)
             all_y.append(y)
 
+    if not all_X:
+        raise ValueError(
+            f"No usable training data from {len(experiments)} experiments. "
+            f"All requests may have failed or produced empty feature matrices."
+        )
     return np.vstack(all_X), np.concatenate(all_y)
 
 
@@ -397,8 +414,8 @@ BETA_EXPECTED_RANGES = {
 def fit_coefficients(hw: HardwareSpec) -> FittedCoefficients:
     """Fit all 10 crossmodel latency parameters from training data.
 
-    Requires: traces.json and exp-config.yaml for all 16 experiments
-              exist under default_args/.
+    Requires: traces.json and exp-config.yaml for all training and validation
+              experiments (from get_train() and get_validate()) exist under default_args/.
     Guarantees: all alpha >= 0, all beta >= 0, lambda chosen by validation MSE.
     """
     train_exps = get_train()
@@ -455,7 +472,8 @@ def write_diagnostics(
     """Write fitting diagnostics to output/fit/.
 
     Requires: coeffs is a fitted FittedCoefficients, hw is the hardware spec used.
-    Guarantees: writes coefficients.json and prints summary to stdout.
+    Guarantees: writes coefficients.json, lambda_tuning.json, and residuals.json
+                to output/fit/, and prints summary to stdout.
     """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

@@ -34,17 +34,22 @@ Move these 3 entries from `EXPERIMENTS` to a new `EXCLUDED_OVERLOAD` tuple. Keep
 Remove the `split` field from `ExperimentMeta`. Every experiment in `EXPERIMENTS` is now "active" — the split will be done at request level (Task 2).
 
 Update `_validate_split_integrity()`:
+- Retain: no duplicate dir_names (across both EXPERIMENTS and EXCLUDED_OVERLOAD)
 - Change check 3 from `len(EXPERIMENTS) == 16` to `len(EXPERIMENTS) == 13`
 - Remove checks 4, 5, 6, 7 (they reference train/validate/test experiment-level splits which no longer exist)
 - Add: every experiment in `EXCLUDED_OVERLOAD` has `failure_rate > 0.10`
-- Add: no experiment in `EXPERIMENTS` appears in `EXCLUDED_OVERLOAD` (and vice versa)
+- Add: no overlap between EXPERIMENTS and EXCLUDED_OVERLOAD (by dir_name)
 - Add: `len(EXPERIMENTS) + len(EXCLUDED_OVERLOAD) == 16`
 
 Remove `get_train()`, `get_validate()`, `get_test()`, `get_split()` functions. These will be replaced in Task 2 with request-level splitting. (Note: if `fit_coefficients.py` imports these, it will break — that's expected, it gets fixed in Tasks 5-6.)
 
-Remove the `Split` enum and the `split` field from `ExperimentMeta` (no longer needed).
+Remove the `Split` enum and the `split` field from `ExperimentMeta` (no longer needed at Task 1 time — re-added in Task 2 for `request_split()` return type).
 
-Keep `get_by_model()`, `get_by_profile()`, `experiment_dir()`, `config_json_path()`.
+Update `get_by_model()` and `get_by_profile()`: remove the `Optional[Split]` parameter and `e.split` filtering (the `split` field no longer exists on ExperimentMeta). They become simple model/profile filters over active experiments.
+
+Update or remove `print_summary()`: this function uses `get_split()`, `Split.TRAIN/VALIDATE/TEST` extensively. Since experiment-level splits no longer exist, either: (a) rewrite to just list all active experiments without split grouping, or (b) remove entirely and update CLAUDE.md to remove the `python3 split.py` command. Option (a) is simpler.
+
+Keep `experiment_dir()`, `config_json_path()`.
 
 Add `get_active() -> list[ExperimentMeta]` that returns all experiments in `EXPERIMENTS` (for code that needs to iterate all active experiments).
 
@@ -52,11 +57,14 @@ Add `get_active() -> list[ExperimentMeta]` that returns all experiments in `EXPE
 
 After removing the `split` field from `ExperimentMeta`, these files will break:
 - `reconstruct_steps.py` lines 596, 653, 662 — `_write_experiment_json` and main block use `exp.split.value`
-- `validate_traces.py` lines 162, 204, 223 — validation output uses `exp.split.value`
+- `validate_traces.py` lines 162, 189, 204, 223 — validation output uses `exp.split.value`
+- `fit_coefficients.py` line 522 — `exp.split.value` in `write_diagnostics()` residual loop
 - `tests/test_trace_parser_api.py` line 12 — imports `get_train`
 - `tests/test_fit_coefficients.py` — imports `get_train`
 
-Fix `reconstruct_steps.py` and `validate_traces.py`: replace `exp.split.value` with a static string like `"active"` or remove the split field from JSON output entirely (since all experiments are now active).
+Fix `reconstruct_steps.py` and `validate_traces.py`: remove the `"split"` field from JSON output and the split column from print statements (since all experiments are now active, the field adds no information). Also update docstrings that say "16 experiments" → "13 experiments".
+
+Fix `fit_coefficients.py:write_diagnostics()` line 522: remove `"split": exp.split.value` from the residuals dict. (The function gets fully rewritten in Task 5, but this prevents crashes between Tasks 1-5.)
 
 Fix `tests/test_trace_parser_api.py`: replace `from split import get_train` with `from split import get_active` and use `get_active()[0]` instead of `get_train()[0]`.
 
@@ -73,7 +81,7 @@ Expected: Some tests FAIL because they import `get_train` which no longer exists
 **Step 4: Commit**
 
 ```bash
-git add split.py reconstruct_steps.py validate_traces.py tests/test_trace_parser_api.py
+git add split.py reconstruct_steps.py validate_traces.py fit_coefficients.py tests/test_trace_parser_api.py
 git commit -m "refactor: exclude 3 overload experiments, remove experiment-level split
 
 Removes Split enum and split field from ExperimentMeta. Moves 3 overload

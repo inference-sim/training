@@ -68,7 +68,7 @@ e2e(r)   = api_overhead + simulator_queueing + gpu_processing + postdecode
 
 `simulator_queueing` is produced by the simulator's scheduler, not learned.
 
-Note on ground-truth alignment: `RequestLabel.processing_us` = FINISHED.ts − SCHEDULED.ts − gaps (covers scheduler steps only, no API or post-decode overhead). `RequestLabel.e2e_us` = FINISHED.ts − QUEUED.ts (includes scheduler wait but not API overhead or post-decode). Each α/β is evaluated against its own signal, not against e2e directly.
+Note on ground-truth alignment: `RequestLabel.processing_us` = FINISHED.ts − SCHEDULED.ts − gaps (covers scheduler steps only, no API or post-decode overhead). Planned decomposition: `prefill_processing_us` = FIRST_TOKEN.ts − SCHEDULED.ts − prefill_gaps and `decode_processing_us` = FINISHED.ts − FIRST_TOKEN.ts − decode_gaps (see Stage 4 timing decomposition). `RequestLabel.e2e_us` = FINISHED.ts − QUEUED.ts (includes scheduler wait but not API overhead or post-decode). Each α/β is evaluated against its own signal, not against e2e directly.
 
 ---
 
@@ -113,7 +113,7 @@ Key design decisions:
 Output types (frozen):
 
 - `ReconstructedStep`: step_id, prefill_reqs (tuple[PrefillEntry]), decode_reqs (tuple[DecodeEntry]), totals
-- `RequestLabel`: timing in µs (queueing, ttft, processing, e2e), preemption count, failed flag
+- `RequestLabel`: timing in µs (queueing, ttft, processing, e2e), preemption count, failed flag. Planned: `prefill_processing_us` and `decode_processing_us` (see Stage 4 timing decomposition).
 - `ExperimentReconstruction`: steps + labels + max_num_batched_tokens
 
 ### Stage 3 — Basis functions (`basis_functions.py`)
@@ -182,7 +182,27 @@ From `ReconstructedStep`: T_pf (total prefill tokens), T_dc (decode request coun
 
 ### Stage 4 — Coefficient fitting (`fit_coefficients.py`)
 
-**Done.** Three-phase NNLS fitting.
+**In progress.** Three-phase NNLS fitting. The current implementation uses a single `processing_us` target per request, which causes β₁ (prefill roofline) to be zeroed out due to scale mismatch (~1 prefill step vs ~247 decode steps). The stacked prefill/decode formulation below is the planned fix.
+
+#### Timing decomposition (planned)
+
+`RequestLabel` will be extended with `prefill_processing_us` and `decode_processing_us` fields, decomposing `processing_us` using the `FIRST_TOKEN` event as the boundary:
+
+```
+prefill_processing_us = (FIRST_TOKEN.ts − SCHEDULED.ts − prefill_gaps) · 1e6
+decode_processing_us  = (FINISHED.ts − FIRST_TOKEN.ts − decode_gaps) · 1e6
+```
+
+where preemption gaps are partitioned by comparing `PREEMPTED.ts` against `FIRST_TOKEN.ts`:
+- Prefill gap: `PREEMPTED.ts < FIRST_TOKEN.ts` (preemption occurred before first token)
+- Decode gap: `PREEMPTED.ts > FIRST_TOKEN.ts` (preemption occurred after first token)
+
+**Invariant:** `prefill_processing_us + decode_processing_us = processing_us` (exact, by construction — the gap partition is exhaustive and the timestamp arithmetic telescopes).
+
+The decomposition is valid because:
+- `FIRST_TOKEN` occurs exactly once per non-failed request (guaranteed by the lifecycle completeness check in Stage 1 and the event model — one first-token event per request)
+- Events are sorted by `(step, ts)` before processing, so temporal ordering is reliable
+- Preemption during prefill is supported (the state machine re-enters PREFILL on resume if `prefill_complete` is False)
 
 #### Phase 1: API processing overhead (α₀)
 
@@ -195,7 +215,7 @@ Estimates the constant delay between request arrival at the API server and hando
 - Signal: `api.ARRIVED` on `llm_request` span → `journey.QUEUED` on `llm_core` span
 - This is API-side work: request parsing, tokenization, validation, engine handoff
 - Estimated as simple mean (not regression) because prompt token range in this dataset is too narrow (557–808) to identify a per-token slope
-- Requires extending `trace_parser.py` to extract `api.ARRIVED` events from `llm_request` spans
+- Requires `parse_api_events()` in `trace_parser.py` to extract `api.ARRIVED` events from `llm_request` spans
 
 Note: the scheduler queueing delay (QUEUED → SCHEDULED) is NOT modeled — the simulator produces this internally.
 
@@ -213,32 +233,73 @@ minimize ||Xα - y||²   subject to α ≥ 0
 - α₂: per-token detokenization cost (µs/token)
 - No regularization
 - Solver: `scipy.optimize.nnls`
-- Requires extending `trace_parser.py` to extract `api.DEPARTED` events from `llm_request` spans
-
-Preliminary measurement on llama-2-7b-general: mean ≈ 10 µs/token total overhead.
+- Requires `parse_api_events()` in `trace_parser.py` to extract `api.DEPARTED` events from `llm_request` spans
 
 #### Phase 3: GPU processing model (β₁–β₇)
 
-Fits the step-time model coefficients on GPU processing time.
+Fits the step-time model coefficients using separate prefill and decode targets.
+
+##### Why separate prefill/decode objectives
+
+The current formulation uses a single target per request: `processing_us = Σ StepTime(s)` across all active steps. This causes β₁ (prefill roofline correction) to be zeroed out because:
+- Prefill occupies ~1 step while decode occupies ~247 steps per request
+- β₁'s feature column is ~250x smaller in magnitude than β₂'s
+- NNLS zeros out β₁ because it has negligible leverage on total processing time
+
+Separating the objective into `MSE(prefill_time) + MSE(decode_time)` gives prefill and decode equal structural weight in the loss function. Each row in the system predicts a quantity whose scale matches its feature magnitudes.
+
+##### Stacked NNLS formulation (planned)
+
+For each non-failed request r, compute two feature vectors by summing per-step basis values over the steps where r appears in prefill vs. decode:
 
 ```
-X_r = [Σ max(t_pf_compute, t_pf_kv),   # β₁
-       Σ max(t_dc_compute, t_dc_kv),   # β₂
-       Σ t_weight,                       # β₃
-       Σ t_tp,                           # β₄
-       Σ L,                              # β₅
-       Σ batch_size,                     # β₆
-       num_active_steps]                 # β₇
+X_pf(r) = [Σ max(t_pf_compute, t_pf_kv),   # β₁   (summed over prefill steps of r)
+            Σ max(t_dc_compute, t_dc_kv),   # β₂
+            Σ t_weight,                       # β₃
+            Σ t_tp,                           # β₄
+            Σ L,                              # β₅
+            Σ batch_size,                     # β₆
+            num_prefill_steps]               # β₇
 
-minimize ||Xβ - y||² + λ · Σᵢ₌₁⁴ (βᵢ - 1)²   subject to β ≥ 0
+X_dc(r) = [Σ max(t_pf_compute, t_pf_kv),   # β₁   (summed over decode steps of r)
+            Σ max(t_dc_compute, t_dc_kv),   # β₂
+            Σ t_weight,                       # β₃
+            Σ t_tp,                           # β₄
+            Σ L,                              # β₅
+            Σ batch_size,                     # β₆
+            num_decode_steps]                # β₇
 ```
 
-- Target: `RequestLabel.processing_us` (= FINISHED.ts − SCHEDULED.ts − preemption_gaps). This already excludes post-decode overhead because it ends at FINISHED, not DEPARTED. No subtraction of α₁/α₂ needed.
-- Per-request features: sum of per-step basis values along the request's trajectory
-- Regularization: Tikhonov on β₁–β₄ only (toward prior of 1.0). β₅–β₇ unregularized.
-  - Physics-informed: regularize where we have physics (roofline corrections), unconstrained where we don't (system overheads)
-- λ tuned on validation set (grid search, pick lowest validation MSE)
-- Solver: constrained QP (`scipy.optimize.lsq_linear` or `minimize` with bounds)
+The stacked system solves a single NNLS problem:
+
+```
+⌈ X_pf(r₁) ⌉       ⌈ prefill_processing_us(r₁) ⌉
+│ X_pf(r₂) │       │ prefill_processing_us(r₂) │
+│   ...     │       │          ...               │
+│ X_dc(r₁) │ β  ≈  │ decode_processing_us(r₁)  │
+│ X_dc(r₂) │       │ decode_processing_us(r₂)  │
+⌊   ...     ⌋       ⌊          ...               ⌋
+
+minimize ||X_stacked · β − y_stacked||² + λ · Σᵢ₌₁⁴ (βᵢ − 1)²   subject to β ≥ 0
+```
+
+All 7 β coefficients are **shared** between the prefill and decode rows. This is physically correct: weight loading, TP communication, per-layer overhead, and scheduling costs are properties of the step, not of whether the step is doing prefill or decode.
+
+**Key properties of the stacked formulation:**
+- In pure-prefill steps: `max(t_dc_compute, t_dc_kv) = 0`, so β₂ gets no signal from those rows. β₁ gets signal.
+- In pure-decode steps: `max(t_pf_compute, t_pf_kv) = 0`, so β₁ gets no signal from those rows. β₂ gets signal.
+- In mixed steps (prefill + decode in same step): both β₁ and β₂ get signal. The step's full duration is attributed to both the prefilling and decoding request.
+- β₃–β₇ are shared: the same weight-loading correction applies regardless of step type.
+
+**Invariant:** `X_pf(r) + X_dc(r) = X_total(r)` where `X_total` is the original single-row feature vector. This ensures the stacked formulation is a refinement, not a redefinition, of the original model.
+
+##### Regularization
+
+Tikhonov regularization on β₁–β₄ only (toward prior of 1.0). β₅–β₇ unregularized. Implemented via augmented matrix: append √λ·I₄ₓ₇ rows to X_stacked, √λ·1₄ to y_stacked.
+
+λ tuned on validation set (grid search over [0, 0.01, 0.1, 1, 10, 100], pick lowest validation MSE). Validation MSE is the combined prefill + decode MSE.
+
+Solver: `scipy.optimize.nnls` on the augmented system.
 
 #### Why NNLS over MAPE + gradient-free
 
@@ -246,9 +307,24 @@ The original design (issue #3) proposed MAPE with Nelder-Mead. We switched to MS
 
 - `max()` is precomputed on raw basis values, making the regression linear in β
 - Request-level aggregation (summing step predictions) preserves linearity
+- The stacked prefill/decode system is still a single linear NNLS problem
 - NNLS is convex → guaranteed global optimum, fast, deterministic
 - MSE is unbiased (MAPE biases predictions low)
 - Non-negativity is physically correct for all parameters
+
+#### Diagnostics
+
+Output to `output/fit/`:
+- `coefficients.json` — all 10 fitted parameters
+- `lambda_tuning.json` — λ vs validation MSE curve
+- `residuals.json` — per-experiment residual summary
+
+MSE reported for all three phases independently:
+- Phase 1: MSE of α₀ vs observed (QUEUED.ts − ARRIVED.ts)
+- Phase 2: MSE of (α₁ + α₂·n) vs observed (DEPARTED.ts − FINISHED.ts)
+- Phase 3: combined prefill + decode MSE, and each reported separately
+
+This three-phase reporting ensures each component's prediction quality is visible. A poor α₀ estimate does not mask a good β fit.
 
 #### Parameter summary
 
@@ -257,13 +333,13 @@ The original design (issue #3) proposed MAPE with Nelder-Mead. We switched to MS
 | α₀ | 1 | API processing overhead (fixed) | QUEUED.ts − ARRIVED.ts | ≥ 0 | None | ~5–7 ms |
 | α₁ | 2 | Post-decode per-request overhead | DEPARTED.ts − FINISHED.ts | ≥ 0 | None | ~0–500 µs |
 | α₂ | 2 | Post-decode per-token cost (detokenization) | DEPARTED.ts − FINISHED.ts | ≥ 0 | None | ~1–10 µs/tok |
-| β₁ | 3 | Prefill roofline correction (1/MFU_prefill) | processing_us | ≥ 0 | λ·(β₁−1)² | 1.5–3.0 |
-| β₂ | 3 | Decode roofline correction (1/MFU_decode) | processing_us | ≥ 0 | λ·(β₂−1)² | 5–15 |
-| β₃ | 3 | Weight loading correction (1/BW_eff) | processing_us | ≥ 0 | λ·(β₃−1)² | 1.0–3.0 |
-| β₄ | 3 | TP communication correction | processing_us | ≥ 0 | λ·(β₄−1)² | 0.5–2.0 |
-| β₅ | 3 | Per-layer kernel launch + NCCL latency | processing_us | ≥ 0 | None | ~10–50 µs/layer |
-| β₆ | 3 | Per-request CPU scheduling cost | processing_us | ≥ 0 | None | ~50 µs/req |
-| β₇ | 3 | Fixed per-step overhead | processing_us | ≥ 0 | None | ~500 µs |
+| β₁ | 3 | Prefill roofline correction (1/MFU_prefill) | prefill_processing_us | ≥ 0 | λ·(β₁−1)² | 1.5–3.0 |
+| β₂ | 3 | Decode roofline correction (1/MFU_decode) | decode_processing_us | ≥ 0 | λ·(β₂−1)² | 5–15 |
+| β₃ | 3 | Weight loading correction (1/BW_eff) | prefill + decode | ≥ 0 | λ·(β₃−1)² | 1.0–3.0 |
+| β₄ | 3 | TP communication correction | prefill + decode | ≥ 0 | λ·(β₄−1)² | 0.5–2.0 |
+| β₅ | 3 | Per-layer kernel launch + NCCL latency | prefill + decode | ≥ 0 | None | ~10–50 µs/layer |
+| β₆ | 3 | Per-request CPU scheduling cost | prefill + decode | ≥ 0 | None | 50–200 µs/req |
+| β₇ | 3 | Fixed per-step overhead | prefill + decode | ≥ 0 | None | 100–2000 µs |
 
 ### Stage 5 — Evaluation (`evaluate.py`)
 
@@ -272,22 +348,12 @@ The original design (issue #3) proposed MAPE with Nelder-Mead. We switched to MS
 Evaluation targets (each component evaluated independently against its own signal):
 - API overhead: predicted α₀ vs observed `QUEUED.ts − ARRIVED.ts`
 - Post-decode: predicted (α₁ + α₂·n) vs observed `DEPARTED.ts − FINISHED.ts`
-- GPU processing: predicted Σ StepTime vs observed `RequestLabel.processing_us`
+- GPU prefill: predicted prefill time vs observed `RequestLabel.prefill_processing_us`
+- GPU decode: predicted decode time vs observed `RequestLabel.decode_processing_us`
+- GPU combined: predicted total vs observed `RequestLabel.processing_us`
 - β diagnostic: check fitted values against expected ranges (all β should be hardware constants, not model-dependent — this is the "crossmodel" property)
 
 ---
-
-## Data split
-
-Defined in `split.py` (single source of truth, validated on import).
-
-| Split | Experiments | Requests | Purpose |
-|-------|------------|----------|---------|
-| Train | 10 | ~107K | Fit all parameters |
-| Validate | 3 | ~16K | Tune λ (regularization strength) |
-| Test | 3 | ~10K | Final evaluation (never touch during fitting) |
-
-Train covers 4 architectures × 3 profiles (general, codegen, roleplay). No reasoning profile in train — reserved for generalization testing. Validate tests cross-profile and overload. Test exercises reasoning/saturation regime.
 
 ## Dataset
 
@@ -299,3 +365,57 @@ Train covers 4 architectures × 3 profiles (general, codegen, roleplay). No reas
 | Llama-2-70b | 4 | GQA (kv_heads=8) | No |
 | Mixtral-8x7B | 2 | GQA (kv_heads=8) | Yes (N=8, k=2) |
 | CodeLlama-34b | 2 | GQA (kv_heads=8) | No |
+
+### Overload exclusion (planned)
+
+3 of the 16 experiments are in the **overload regime** (high failure rates due to preemption cascades and timeouts):
+
+| Experiment | Failure rate | Current split |
+|------------|-------------|---------------|
+| llama-2-7b reasoning | 85% | test |
+| llama-2-70b reasoning | 33% | test |
+| mixtral-8x7b reasoning | 69% | validate |
+
+Currently, these experiments are assigned to validate/test splits. Failed requests within them are filtered out by `build_feature_matrix()`, but their successful requests still participate in validation/test evaluation. **Planned change:** exclude these 3 experiments entirely. The linear step-time model cannot capture the nonlinear dynamics of overload (preemption cascades amplify latency non-linearly), and including them contaminates validation MSE (the mixtral-reasoning experiment alone contributes 7-second RMSE, dominating the validation signal).
+
+codellama-34b reasoning (0.08% failure, 4800 successful requests) is NOT overloaded — it is a long-request saturation regime where the model has sufficient capacity. It is retained.
+
+**Planned active dataset: 13 experiments, ~130K successful requests.**
+
+## Data split
+
+Defined in `split.py` (single source of truth, validated on import).
+
+### Current: experiment-level splitting
+
+| Split | Experiments | Successful requests | Purpose |
+|-------|------------|---------------------|---------|
+| Train | 10 | ~116K | Fit all parameters |
+| Validate | 3 | ~18K | Tune λ (regularization strength) |
+| Test | 3 | ~9K | Final evaluation (never touch during fitting) |
+
+Train covers 4 architectures × 3 profiles (general, codegen, roleplay). No reasoning profile in train (prevents overload regime leakage). Validate tests cross-profile (codellama codegen/roleplay) and overload (mixtral reasoning). Test exercises reasoning/saturation regime.
+
+### Planned: request-level splitting
+
+**Split unit: individual requests**, not experiments. Since the fitting pipeline uses teacher-forced reconstruction (real batch compositions, not simulated), per-request features are independent — request N's feature vector does not depend on request M's split assignment. This eliminates the regime bias of experiment-level splitting, where an entire workload profile (reasoning) is absent from training.
+
+After excluding the 3 overload experiments, split assignment uses a deterministic hash of the request ID (SHA-256 mod 100) for reproducibility across runs and platforms. Ratio: 70% train, 15% validate, 15% test.
+
+| Split | Requests | Purpose |
+|-------|----------|---------|
+| Train | ~91K (70%) | Fit all 10 parameters |
+| Validate | ~19.5K (15%) | Tune λ (regularization strength) |
+| Test | ~19.5K (15%) | Final evaluation (never touch during fitting) |
+
+Every split contains requests from all 4 model architectures and all active profiles (general, codegen, roleplay, reasoning). This ensures:
+- β₁ (prefill roofline) sees prefill steps from all architectures in training
+- β₂ (decode roofline) sees decode steps across MHA, GQA, and MoE
+- Validation and test are representative of the full operating range
+
+**Planned invariants:**
+- Every active (non-overload) request appears in exactly one split.
+- Split assignment depends only on request ID — deterministic, no randomness.
+- The 3 overload experiments contribute zero requests to any split.
+
+Note: experiment-level splitting remains appropriate for Stage 5 (simulator replay evaluation), where the simulator must replay a complete arrival stream. The request-level split is specific to Stage 4 coefficient fitting.

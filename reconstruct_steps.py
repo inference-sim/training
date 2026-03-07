@@ -94,15 +94,17 @@ class RequestLabel:
         When failed=True: all timing and token fields are zero (incomplete lifecycle).
         When failed=False: timing fields are non-negative, prompt_tokens > 0.
         e2e_us >= ttft_us >= queueing_us (when failed=False).
-        processing_us = e2e_us - queueing_us - preemption_gaps (approximately).
+        processing_us = prefill_processing_us + decode_processing_us (exact).
     """
     request_id: str
     prompt_tokens: int
     output_tokens: int
-    queueing_us: float      # SCHEDULED.ts - QUEUED.ts (microseconds)
-    ttft_us: float           # FIRST_TOKEN.ts - QUEUED.ts
-    processing_us: float     # FINISHED.ts - SCHEDULED.ts - preemption gaps
-    e2e_us: float            # FINISHED.ts - QUEUED.ts
+    queueing_us: float              # SCHEDULED.ts - QUEUED.ts (microseconds)
+    ttft_us: float                   # FIRST_TOKEN.ts - QUEUED.ts
+    processing_us: float             # FINISHED.ts - SCHEDULED.ts - preemption gaps
+    prefill_processing_us: float     # FIRST_TOKEN.ts - SCHEDULED.ts - prefill gaps
+    decode_processing_us: float      # FINISHED.ts - FIRST_TOKEN.ts - decode gaps
+    e2e_us: float                    # FINISHED.ts - QUEUED.ts
     num_preemptions: int
     failed: bool
     first_step: int
@@ -327,7 +329,12 @@ def _build_intervals(tl: RequestTimeline) -> None:
 #   - Warns on negative timing values (indicates data corruption).
 
 def _compute_label(tl: RequestTimeline) -> RequestLabel:
-    """Compute ground-truth timing labels from journey timestamps."""
+    """Compute ground-truth timing labels from journey timestamps.
+
+    Guarantees:
+        prefill_processing_us + decode_processing_us == processing_us (exact).
+        Preemption gaps partitioned by FIRST_TOKEN.ts boundary.
+    """
     ev_map: dict[str, list[ParsedEvent]] = {}
     for ev in tl.events:
         ev_map.setdefault(ev.name, []).append(ev)
@@ -337,19 +344,31 @@ def _compute_label(tl: RequestTimeline) -> RequestLabel:
     first_token = ev_map["FIRST_TOKEN"][0]
     finished = ev_map["FINISHED"][0]
 
-    preemption_gap_s = 0.0
+    # Partition preemption gaps into prefill vs decode using FIRST_TOKEN.ts
+    prefill_gap_s = 0.0
+    decode_gap_s = 0.0
     preempted_events = ev_map.get("PREEMPTED", [])
     resume_events = [e for e in ev_map.get("SCHEDULED", []) if e.schedule_kind == "RESUME"]
     for pre, res in zip(preempted_events, resume_events):
-        preemption_gap_s += res.ts - pre.ts
+        gap = res.ts - pre.ts
+        if pre.ts < first_token.ts:
+            prefill_gap_s += gap
+        else:
+            decode_gap_s += gap
+
+    preemption_gap_s = prefill_gap_s + decode_gap_s
 
     queueing_s = scheduled.ts - queued.ts
     ttft_s = first_token.ts - queued.ts
     processing_s = (finished.ts - scheduled.ts) - preemption_gap_s
+    prefill_processing_s = (first_token.ts - scheduled.ts) - prefill_gap_s
+    decode_processing_s = (finished.ts - first_token.ts) - decode_gap_s
     e2e_s = finished.ts - queued.ts
 
     for name, val in [("queueing", queueing_s), ("ttft", ttft_s),
-                       ("processing", processing_s), ("e2e", e2e_s)]:
+                       ("processing", processing_s), ("e2e", e2e_s),
+                       ("prefill_processing", prefill_processing_s),
+                       ("decode_processing", decode_processing_s)]:
         if val < 0:
             warnings.warn(
                 f"Request {tl.request_id}: negative {name} = {val:.6f}s"
@@ -362,6 +381,8 @@ def _compute_label(tl: RequestTimeline) -> RequestLabel:
         queueing_us=queueing_s * 1e6,
         ttft_us=ttft_s * 1e6,
         processing_us=processing_s * 1e6,
+        prefill_processing_us=prefill_processing_s * 1e6,
+        decode_processing_us=decode_processing_s * 1e6,
         e2e_us=e2e_s * 1e6,
         num_preemptions=len(preempted_events),
         failed=False,
@@ -565,7 +586,9 @@ def reconstruct_experiment(exp: ExperimentMeta) -> ExperimentReconstruction:
         if tl is None:
             failed_labels.append(RequestLabel(
                 request_id=req_id, prompt_tokens=0, output_tokens=0,
-                queueing_us=0.0, ttft_us=0.0, processing_us=0.0, e2e_us=0.0,
+                queueing_us=0.0, ttft_us=0.0, processing_us=0.0,
+                prefill_processing_us=0.0, decode_processing_us=0.0,
+                e2e_us=0.0,
                 num_preemptions=0, failed=True, first_step=0, last_step=0,
             ))
             continue
@@ -593,7 +616,6 @@ def _write_experiment_json(
     with open(out_path, "w") as f:
         header = {
             "experiment": exp.dir_name,
-            "split": exp.split.value,
             "model_short": exp.model_short,
             "tensor_parallelism": exp.tensor_parallelism,
             "max_num_batched_tokens": result.max_num_batched_tokens,
@@ -630,7 +652,7 @@ def main() -> int:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     header = (
-        f"{'Experiment':<58} {'Split':<6} "
+        f"{'Experiment':<58} "
         f"{'Steps':>7} {'Reqs':>7} {'Fail':>5} "
         f"{'AvgBatch':>8} {'PF tok':>10} {'DC tok':>10}"
     )
@@ -650,7 +672,7 @@ def main() -> int:
         total_dc = sum(s.total_decode_tokens for s in result.steps)
 
         print(
-            f"{exp.dir_name:<58} {exp.split.value:<6} "
+            f"{exp.dir_name:<58} "
             f"{n_steps:>7,} {n_reqs:>7,} {n_failed:>5} "
             f"{avg_batch:>8.1f} {total_pf:>10,} {total_dc:>10,}"
         )
@@ -659,7 +681,6 @@ def main() -> int:
 
         summary_rows.append({
             "experiment": exp.dir_name,
-            "split": exp.split.value,
             "model_short": exp.model_short,
             "num_steps": n_steps,
             "num_requests": n_reqs,

@@ -5,7 +5,7 @@ non-negative least squares regression.
 
 Phase 1: α₀ — API processing overhead (mean of QUEUED.ts − ARRIVED.ts)
 Phase 2: α₁, α₂ — Post-decode overhead (NNLS on DEPARTED.ts − FINISHED.ts)
-Phase 3: β₁–β₇ — GPU step-time model (regularized NNLS on processing_us)
+Phase 3: β₁–β₇ — GPU step-time model (stacked prefill/decode regularized NNLS)
 
 Public API
 ----------
@@ -35,7 +35,7 @@ from reconstruct_steps import (
     RequestLabel,
     reconstruct_experiment,
 )
-from split import ExperimentMeta, get_train, get_validate
+from split import ExperimentMeta, Split, get_active, request_split
 from trace_parser import (
     attr_map,
     parse_api_events,
@@ -120,73 +120,99 @@ def fit_alpha_12(
 
 
 # =============================================================================
-# Per-request feature matrix
+# Stacked prefill/decode feature matrix
 # =============================================================================
 
-def build_feature_matrix(
+def build_stacked_feature_matrix(
     steps: list[ReconstructedStep] | tuple[ReconstructedStep, ...],
     basis_values: list[StepBasisValues],
     labels: list[RequestLabel] | tuple[RequestLabel, ...],
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """Build per-request feature matrix for Phase 3 regression.
+    """Build stacked prefill+decode feature matrix for Phase 3 regression.
 
-    For each non-failed request, sums per-step basis values along the
-    request's active steps.
+    For each non-failed request, produces two rows:
+    - Prefill row: basis values summed over steps where request is prefilling
+    - Decode row: basis values summed over steps where request is decoding
+
+    Selective accumulation: β₁ (prefill roofline) only from prefill entries,
+    β₂ (decode roofline) only from decode entries. Shared β₃-β₇ from both.
 
     Requires:
         steps and basis_values are aligned (same length, same step order).
-        labels contains one entry per request.
+        labels contains one entry per request with prefill_processing_us
+        and decode_processing_us fields.
     Guarantees:
-        X has shape (n_requests, 7), y has shape (n_requests,).
-        All X values >= 0. y values are processing_us from labels.
+        X has shape (2 * n_requests, 7), y has shape (2 * n_requests,).
+        First n_requests rows are prefill, last n_requests rows are decode.
+        X_pf[i] + X_dc[i] == X_total[i] for all i (feature sum invariant).
         Failed requests are excluded.
 
-    Returns: (X, y, request_ids) where request_ids[i] corresponds to row i.
+    Returns: (X, y, request_ids) where request_ids has n_requests entries
+             (each appearing once, covering both their prefill and decode rows).
     """
     label_map = {lb.request_id: lb for lb in labels if not lb.failed}
 
-    features: dict[str, list[float]] = {rid: [0.0] * 7 for rid in label_map}
-    step_counts: dict[str, int] = {rid: 0 for rid in label_map}
+    pf_features: dict[str, list[float]] = {rid: [0.0] * 7 for rid in label_map}
+    dc_features: dict[str, list[float]] = {rid: [0.0] * 7 for rid in label_map}
+    pf_step_counts: dict[str, int] = {rid: 0 for rid in label_map}
+    dc_step_counts: dict[str, int] = {rid: 0 for rid in label_map}
 
     for step, bv in zip(steps, basis_values):
         for entry in step.prefill_reqs:
             rid = entry.request_id
-            if rid not in features:
+            if rid not in pf_features:
                 continue
-            features[rid][0] += max(bv.t_pf_compute, bv.t_pf_kv)
-            features[rid][2] += bv.t_weight
-            features[rid][3] += bv.t_tp
-            features[rid][4] += bv.num_layers
-            features[rid][5] += bv.batch_size
-            step_counts[rid] += 1
+            # β₁ (prefill roofline) — only from prefill entries
+            pf_features[rid][0] += max(bv.t_pf_compute, bv.t_pf_kv)
+            # β₂ (decode roofline) — NOT accumulated for prefill entries
+            # Shared β₃-β₇
+            pf_features[rid][2] += bv.t_weight
+            pf_features[rid][3] += bv.t_tp
+            pf_features[rid][4] += bv.num_layers
+            pf_features[rid][5] += bv.batch_size
+            pf_step_counts[rid] += 1
 
         for entry in step.decode_reqs:
             rid = entry.request_id
-            if rid not in features:
+            if rid not in dc_features:
                 continue
-            features[rid][1] += max(bv.t_dc_compute, bv.t_dc_kv)
-            features[rid][2] += bv.t_weight
-            features[rid][3] += bv.t_tp
-            features[rid][4] += bv.num_layers
-            features[rid][5] += bv.batch_size
-            step_counts[rid] += 1
+            # β₁ (prefill roofline) — NOT accumulated for decode entries
+            # β₂ (decode roofline) — only from decode entries
+            dc_features[rid][1] += max(bv.t_dc_compute, bv.t_dc_kv)
+            # Shared β₃-β₇
+            dc_features[rid][2] += bv.t_weight
+            dc_features[rid][3] += bv.t_tp
+            dc_features[rid][4] += bv.num_layers
+            dc_features[rid][5] += bv.batch_size
+            dc_step_counts[rid] += 1
 
     req_ids: list[str] = []
-    X_rows: list[list[float]] = []
-    y_list: list[float] = []
+    pf_rows: list[list[float]] = []
+    dc_rows: list[list[float]] = []
+    y_pf: list[float] = []
+    y_dc: list[float] = []
 
-    for rid, feat in features.items():
-        if step_counts[rid] == 0:
+    for rid in label_map:
+        total_steps = pf_step_counts[rid] + dc_step_counts[rid]
+        if total_steps == 0:
             continue
-        feat[6] = float(step_counts[rid])
+        pf_features[rid][6] = float(pf_step_counts[rid])
+        dc_features[rid][6] = float(dc_step_counts[rid])
         req_ids.append(rid)
-        X_rows.append(feat)
-        y_list.append(label_map[rid].processing_us)
+        pf_rows.append(pf_features[rid])
+        dc_rows.append(dc_features[rid])
+        y_pf.append(label_map[rid].prefill_processing_us)
+        y_dc.append(label_map[rid].decode_processing_us)
 
-    if not X_rows:
-        return np.empty((0, 7), dtype=np.float64), np.empty(0, dtype=np.float64), []
-    X = np.array(X_rows, dtype=np.float64)
-    y = np.array(y_list, dtype=np.float64)
+    if not pf_rows:
+        empty_X = np.empty((0, 7), dtype=np.float64)
+        empty_y = np.empty(0, dtype=np.float64)
+        return empty_X, empty_y, []
+
+    X = np.vstack([np.array(pf_rows, dtype=np.float64),
+                   np.array(dc_rows, dtype=np.float64)])
+    y = np.concatenate([np.array(y_pf, dtype=np.float64),
+                        np.array(y_dc, dtype=np.float64)])
     return X, y, req_ids
 
 
@@ -275,12 +301,11 @@ def _journey_id_to_base(journey_id: str) -> str:
     return journey_id
 
 
-def collect_alpha_data(
-    experiments: list[ExperimentMeta],
-) -> tuple[list[tuple[float, float]], list[tuple[float, float, int]]]:
-    """Collect timestamp pairs for alpha_0 and alpha_1/alpha_2 estimation.
+def collect_alpha_data() -> tuple[list[tuple[float, float]], list[tuple[float, float, int]]]:
+    """Collect timestamp pairs for α₀ and α₁/α₂ estimation from training requests.
 
-    Requires: experiments is a list of ExperimentMeta from split.py.
+    Iterates all active experiments, filters to training-split requests only.
+
     Guarantees:
         pairs_0: list of (arrived_ts, queued_ts) in seconds, queued > arrived.
         triples_12: list of (departed_ts, finished_ts, output_tokens),
@@ -291,13 +316,17 @@ def collect_alpha_data(
     pairs_0: list[tuple[float, float]] = []
     triples_12: list[tuple[float, float, int]] = []
 
-    for exp in experiments:
+    for exp in get_active():
         traces_path = traces_path_for(exp)
         api_events = parse_api_events(traces_path)
         journey_events = parse_journey_events(traces_path)
         journey_ts = _extract_journey_timestamps(journey_events)
 
         for journey_id, j_data in journey_ts.items():
+            # Only use training-split requests
+            if request_split(journey_id) != Split.TRAIN:
+                continue
+
             base_id = _journey_id_to_base(journey_id)
             if base_id not in api_events:
                 continue
@@ -368,30 +397,37 @@ def tune_lambda(
 # =============================================================================
 
 def _collect_beta_data(
-    experiments: list[ExperimentMeta],
     hw: HardwareSpec,
+    split_filter: Split,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Collect feature matrix and targets across experiments for Phase 3.
+    """Collect stacked feature matrix and targets for Phase 3.
 
-    Returns: (X, y) concatenated across all experiments.
+    Iterates all active experiments, includes only requests matching split_filter.
+
+    Returns: (X, y) — stacked prefill+decode system.
     """
     all_X: list[np.ndarray] = []
     all_y: list[np.ndarray] = []
 
-    for exp in experiments:
+    for exp in get_active():
         result = reconstruct_experiment(exp)
         arch = load_model_arch(f"model_configs/{exp.config_json_dir}/config.json")
         basis = compute_experiment_basis(result, arch, hw, exp.tensor_parallelism)
 
-        X, y, _ = build_feature_matrix(result.steps, basis, result.labels)
+        # Filter labels to matching split only
+        filtered_labels = [
+            lb for lb in result.labels
+            if not lb.failed and request_split(lb.request_id) == split_filter
+        ]
+
+        X, y, _ = build_stacked_feature_matrix(result.steps, basis, filtered_labels)
         if len(X) > 0:
             all_X.append(X)
             all_y.append(y)
 
     if not all_X:
         raise ValueError(
-            f"No usable training data from {len(experiments)} experiments. "
-            f"All requests may have failed or produced empty feature matrices."
+            f"No usable {split_filter.value} data from {len(get_active())} experiments."
         )
     return np.vstack(all_X), np.concatenate(all_y)
 
@@ -414,25 +450,22 @@ BETA_EXPECTED_RANGES = {
 def fit_coefficients(hw: HardwareSpec) -> FittedCoefficients:
     """Fit all 10 crossmodel latency parameters from training data.
 
-    Requires: traces.json and exp-config.yaml for all training and validation
-              experiments (from get_train() and get_validate()) exist under default_args/.
+    Requires: traces.json and exp-config.yaml for all active experiments
+              exist under default_args/.
     Guarantees: all alpha >= 0, all beta >= 0, lambda chosen by validation MSE.
     """
-    train_exps = get_train()
-    val_exps = get_validate()
-
-    # Phase 1: alpha_0
-    pairs_0, triples_12 = collect_alpha_data(train_exps)
+    # Phase 1: α₀
+    pairs_0, triples_12 = collect_alpha_data()
     alpha_0 = estimate_alpha_0(pairs_0)
 
-    # Phase 2: alpha_1, alpha_2
+    # Phase 2: α₁, α₂
     output_tokens = np.array([t[2] for t in triples_12], dtype=np.float64)
     post_decode_us = np.array([(d - f) * 1e6 for d, f, _ in triples_12], dtype=np.float64)
     alpha_1, alpha_2 = fit_alpha_12(output_tokens, post_decode_us)
 
-    # Phase 3: beta_1-beta_7
-    X_train, y_train = _collect_beta_data(train_exps, hw)
-    X_val, y_val = _collect_beta_data(val_exps, hw)
+    # Phase 3: β₁-β₇ (stacked prefill/decode)
+    X_train, y_train = _collect_beta_data(hw, Split.TRAIN)
+    X_val, y_val = _collect_beta_data(hw, Split.VALIDATE)
 
     best_lambda, best_betas, train_mse, val_mse = tune_lambda(
         X_train, y_train, X_val, y_val,
@@ -491,10 +524,8 @@ def write_diagnostics(
         json.dump(result, f, indent=2)
 
     # Lambda tuning curve
-    train_exps = get_train()
-    val_exps = get_validate()
-    X_train, y_train = _collect_beta_data(train_exps, hw)
-    X_val, y_val = _collect_beta_data(val_exps, hw)
+    X_train, y_train = _collect_beta_data(hw, Split.TRAIN)
+    X_val, y_val = _collect_beta_data(hw, Split.VALIDATE)
 
     tuning_curve: list[dict] = []
     for lam in LAMBDA_GRID:
@@ -508,21 +539,24 @@ def write_diagnostics(
 
     # Per-experiment residual summary
     residuals: list[dict] = []
-    for exp in train_exps + val_exps:
+    for exp in get_active():
         rec = reconstruct_experiment(exp)
         arch = load_model_arch(f"model_configs/{exp.config_json_dir}/config.json")
         basis = compute_experiment_basis(rec, arch, hw, exp.tensor_parallelism)
-        X, y, _ = build_feature_matrix(rec.steps, basis, rec.labels)
+        X, y, _ = build_stacked_feature_matrix(rec.steps, basis, rec.labels)
         if len(X) == 0:
             continue
+        n = len(y) // 2
         pred = X @ np.array(coeffs.betas)
         resid = y - pred
+        pf_rmse = float(np.sqrt(np.mean(resid[:n] ** 2))) if n > 0 else 0.0
+        dc_rmse = float(np.sqrt(np.mean(resid[n:] ** 2))) if n > 0 else 0.0
         residuals.append({
             "experiment": exp.dir_name,
-            "split": exp.split.value,
-            "n_requests": len(y),
-            "mean_residual_us": float(np.mean(resid)),
-            "rmse_us": float(np.sqrt(np.mean(resid ** 2))),
+            "n_requests": n,
+            "prefill_rmse_us": pf_rmse,
+            "decode_rmse_us": dc_rmse,
+            "combined_rmse_us": float(np.sqrt(np.mean(resid ** 2))),
             "mean_y_us": float(np.mean(y)),
         })
 
@@ -548,7 +582,7 @@ def write_diagnostics(
         lo, hi, _ = BETA_EXPECTED_RANGES[i]
         flag = " ⚠" if b < lo or b > hi else ""
         print(f"    β{i} = {b:>10.4f}  [{lo:>5.1f}, {hi:>6.1f}]  {name}{flag}")
-    print(f"\n  MSE:")
+    print(f"\n  MSE (stacked prefill+decode):")
     print(f"    Train:    {coeffs.train_mse:>14,.0f} µs²")
     print(f"    Validate: {coeffs.val_mse:>14,.0f} µs²")
     print(f"    RMSE:     {np.sqrt(coeffs.val_mse):>14,.0f} µs (validation)")

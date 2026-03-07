@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from trace_parser import parse_api_events, parse_journey_events, traces_path_for
-from split import get_train
+from split import get_active
 
 
 class TestParseApiEventsOnRealData:
@@ -23,7 +23,7 @@ class TestParseApiEventsOnRealData:
 
     @pytest.fixture()
     def exp(self):
-        return get_train()[0]  # llama-2-7b general
+        return get_active()[0]  # llama-2-7b general
 
     @pytest.fixture()
     def api_events(self, exp):

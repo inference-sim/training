@@ -8,20 +8,20 @@ Coefficient fitting pipeline for the inference-sim crossmodel latency model. Rec
 
 ```bash
 pytest                         # run tests (< 1s)
-python3 validate_traces.py      # validate all 16 experiments → output/validate/
+python3 validate_traces.py      # validate all 13 active experiments → output/validate/
 python3 reconstruct_steps.py    # reconstruct steps → output/reconstruct/
 python3 fit_coefficients.py     # fit 10 parameters → output/fit/
-python3 split.py                # print train/validate/test summary
+python3 split.py                # print experiment summary
 ```
 
 ## Architecture
 
-- `split.py` is the **single source of truth** for experiment metadata. All modules import from it. Never hard-code experiment lists elsewhere. Validates its own integrity on import (7 assertions).
+- `split.py` is the **single source of truth** for experiment metadata. All modules import from it. Never hard-code experiment lists elsewhere. Validates its own integrity on import (5 assertions). 13 active experiments; 3 overload experiments (>10% failure) in `EXCLUDED_OVERLOAD`. Request-level splitting via `request_split()` (SHA-256 hash, 70/15/15 train/val/test).
 - `trace_parser.py` provides shared OTEL parsing. Owns all knowledge of the JSONL/span nesting format.
 - `schemas.py` defines Pydantic schemas for all data file formats (traces, metrics, configs).
-- `reconstruct_steps.py` is the core module. Public API: `reconstruct_experiment()` (end-to-end) and `reconstruct_timelines()` (testable core, no filesystem).
+- `reconstruct_steps.py` is the core module. `RequestLabel` includes `prefill_processing_us` and `decode_processing_us` (exact decomposition via FIRST_TOKEN boundary). Public API: `reconstruct_experiment()` (end-to-end) and `reconstruct_timelines()` (testable core, no filesystem).
 - `basis_functions.py` computes analytical roofline basis functions (µs) per step. Each basis function is a standalone pure function for extensibility. Public API: `compute_step_basis()` and `compute_experiment_basis()`.
-- `fit_coefficients.py` is the coefficient fitting module. Three-phase NNLS: α₀ (mean), α₁/α₂ (NNLS), β₁-β₇ (regularized NNLS with λ tuned on validation). Public API: `fit_coefficients(hw)` → `FittedCoefficients`.
+- `fit_coefficients.py` is the coefficient fitting module. Three-phase NNLS: α₀ (mean), α₁/α₂ (NNLS), β₁-β₇ (stacked prefill/decode regularized NNLS with λ tuned on validation). Uses `build_stacked_feature_matrix()` — 2 rows per request (prefill + decode targets). Public API: `fit_coefficients(hw)` → `FittedCoefficients`.
 - `validate_traces.py` is independent verification. Does NOT import from `reconstruct_steps.py`.
 
 Output structure: `output/validate/<exp>.json`, `output/reconstruct/<exp>.json` (each with a `summary.json`), and `output/fit/coefficients.json`.
@@ -38,6 +38,8 @@ These invariants are documented inline where they are enforced. When adding code
 - `decode_tokens_before[iv_idx]` enables correct context_length across preemption gaps. Without it, context_length overcounts by the number of preempted steps.
 - `prefill_remaining` is algorithm-local state in `_reconstruct_steps`, NOT stored on `RequestTimeline`. This prevents mixing scratch state with data.
 - Output dataclasses (`ReconstructedStep`, `RequestLabel`, etc.) are frozen. Their invariants are documented in their docstrings.
+- `prefill_processing_us + decode_processing_us == processing_us` (exact, by construction).
+- `X_pf(r) + X_dc(r) == X_total(r)` — stacked feature matrix sum invariant.
 
 ## Invariant documentation discipline
 
@@ -81,7 +83,7 @@ class TestMyScenario:
 ## Adding a new experiment
 
 1. Add `ExperimentMeta` entry to `EXPERIMENTS` in `split.py`.
-2. Update the count assertion in `_validate_split_integrity` (currently expects 16).
+2. Update the count assertions in `_validate_split_integrity` (currently expects 13 active + 16 total).
 3. Place data in `default_args/<experiment>/`.
 4. Run `python validate_traces.py` to verify integrity.
 

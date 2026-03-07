@@ -68,7 +68,7 @@ e2e(r)   = api_overhead + simulator_queueing + gpu_processing + postdecode
 
 `simulator_queueing` is produced by the simulator's scheduler, not learned.
 
-Note on ground-truth alignment: `RequestLabel.processing_us` = FINISHED.ts − SCHEDULED.ts − gaps (covers scheduler steps only, no API or post-decode overhead). Planned decomposition: `prefill_processing_us` = FIRST_TOKEN.ts − SCHEDULED.ts − prefill_gaps and `decode_processing_us` = FINISHED.ts − FIRST_TOKEN.ts − decode_gaps (see Stage 4 timing decomposition). `RequestLabel.e2e_us` = FINISHED.ts − QUEUED.ts (includes scheduler wait but not API overhead or post-decode). Each α/β is evaluated against its own signal, not against e2e directly.
+Note on ground-truth alignment: `RequestLabel.processing_us` = FINISHED.ts − SCHEDULED.ts − gaps (covers scheduler steps only, no API or post-decode overhead). Decomposition: `prefill_processing_us` = FIRST_TOKEN.ts − SCHEDULED.ts − prefill_gaps and `decode_processing_us` = FINISHED.ts − FIRST_TOKEN.ts − decode_gaps. `RequestLabel.e2e_us` = FINISHED.ts − QUEUED.ts (includes scheduler wait but not API overhead or post-decode). Each α/β is evaluated against its own signal, not against e2e directly.
 
 ---
 
@@ -113,7 +113,7 @@ Key design decisions:
 Output types (frozen):
 
 - `ReconstructedStep`: step_id, prefill_reqs (tuple[PrefillEntry]), decode_reqs (tuple[DecodeEntry]), totals
-- `RequestLabel`: timing in µs (queueing, ttft, processing, e2e), preemption count, failed flag. Planned: `prefill_processing_us` and `decode_processing_us` (see Stage 4 timing decomposition).
+- `RequestLabel`: timing in µs (queueing, ttft, processing, prefill_processing, decode_processing, e2e), preemption count, failed flag.
 - `ExperimentReconstruction`: steps + labels + max_num_batched_tokens
 
 ### Stage 3 — Basis functions (`basis_functions.py`)
@@ -182,11 +182,11 @@ From `ReconstructedStep`: T_pf (total prefill tokens), T_dc (decode request coun
 
 ### Stage 4 — Coefficient fitting (`fit_coefficients.py`)
 
-**In progress.** Three-phase NNLS fitting. The current implementation uses a single `processing_us` target per request, which causes β₁ (prefill roofline) to be zeroed out due to scale mismatch (~1 prefill step vs ~247 decode steps). The stacked prefill/decode formulation below is the planned fix.
+**Done.** Three-phase NNLS fitting with stacked prefill/decode formulation. Uses request-level splitting (SHA-256 hash, 70/15/15) and excludes 3 overload experiments (>10% failure).
 
-#### Timing decomposition (planned)
+#### Timing decomposition
 
-`RequestLabel` will be extended with `prefill_processing_us` and `decode_processing_us` fields, decomposing `processing_us` using the `FIRST_TOKEN` event as the boundary:
+`RequestLabel` includes `prefill_processing_us` and `decode_processing_us` fields, decomposing `processing_us` using the `FIRST_TOKEN` event as the boundary:
 
 ```
 prefill_processing_us = (FIRST_TOKEN.ts − SCHEDULED.ts − prefill_gaps) · 1e6
@@ -248,7 +248,7 @@ The current formulation uses a single target per request: `processing_us = Σ St
 
 Separating the objective into `MSE(prefill_time) + MSE(decode_time)` gives prefill and decode equal structural weight in the loss function. Each row in the system predicts a quantity whose scale matches its feature magnitudes.
 
-##### Stacked NNLS formulation (planned)
+##### Stacked NNLS formulation
 
 For each non-failed request r, compute two feature vectors by summing per-step basis values over the steps where r appears in prefill vs. decode:
 
@@ -367,7 +367,7 @@ Evaluation targets (each component evaluated independently against its own signa
 | Mixtral-8x7B | 2 | GQA (kv_heads=8) | Yes (N=8, k=2) |
 | CodeLlama-34b | 2 | GQA (kv_heads=8) | No |
 
-### Overload exclusion (planned)
+### Overload exclusion
 
 3 of the 16 experiments are in the **overload regime** (high failure rates due to preemption cascades and timeouts):
 
@@ -377,29 +377,19 @@ Evaluation targets (each component evaluated independently against its own signa
 | llama-2-70b reasoning | 33% | test |
 | mixtral-8x7b reasoning | 69% | validate |
 
-Currently, these experiments are assigned to validate/test splits. Failed requests within them are filtered out by `build_feature_matrix()`, but their successful requests still participate in validation/test evaluation. **Planned change:** exclude these 3 experiments entirely. The linear step-time model cannot capture the nonlinear dynamics of overload (preemption cascades amplify latency non-linearly), and including them contaminates validation MSE (the mixtral-reasoning experiment alone contributes 7-second RMSE, dominating the validation signal).
+These experiments are excluded from the active dataset. The linear step-time model cannot capture the nonlinear dynamics of overload (preemption cascades amplify latency non-linearly), and including them contaminates validation MSE (the mixtral-reasoning experiment alone contributed 7-second RMSE, dominating the validation signal).
 
 codellama-34b reasoning (0.08% failure, 4796 successful requests) is NOT overloaded — it is a long-request saturation regime where the model has sufficient capacity. It is retained.
 
-**Planned active dataset: 13 experiments, ~137K successful requests.**
+**Active dataset: 13 experiments, ~137K successful requests.**
 
 ## Data split
 
 Defined in `split.py` (single source of truth, validated on import).
 
-### Current: experiment-level splitting
+### Request-level splitting
 
-| Split | Experiments | Successful requests | Purpose |
-|-------|------------|---------------------|---------|
-| Train | 10 | ~116K | Fit all parameters |
-| Validate | 3 | ~18K | Tune λ (regularization strength) |
-| Test | 3 | ~9K | Final evaluation (never touch during fitting) |
-
-Train covers 4 architectures × 3 profiles (general, codegen, roleplay). No reasoning profile in train (prevents overload regime leakage). Validate tests cross-profile (codellama codegen/roleplay) and overload (mixtral reasoning). Test exercises reasoning/saturation regime.
-
-### Planned: request-level splitting
-
-**Split unit: individual requests**, not experiments. Since the fitting pipeline uses teacher-forced reconstruction (real batch compositions, not simulated), per-request features are independent — request N's feature vector does not depend on request M's split assignment. This eliminates the regime bias of experiment-level splitting, where an entire workload profile (reasoning) is absent from training.
+**Split unit: individual requests**, not experiments. Since the fitting pipeline uses teacher-forced reconstruction (real batch compositions, not simulated), per-request features are independent — request N's feature vector does not depend on request M's split assignment. This eliminates the regime bias of experiment-level splitting, where an entire workload profile (reasoning) would be absent from training.
 
 After excluding the 3 overload experiments, split assignment uses a deterministic hash of the request ID (SHA-256 mod 100) for reproducibility across runs and platforms. Ratio: 70% train, 15% validate, 15% test.
 
@@ -414,7 +404,7 @@ Every split contains requests from all 4 model architectures and all active prof
 - β₂ (decode roofline) sees decode steps across MHA, GQA, and MoE
 - Validation and test are representative of the full operating range
 
-**Planned invariants:**
+**Invariants:**
 - Every active (non-overload) request appears in exactly one split.
 - Split assignment depends only on request ID — deterministic, no randomness.
 - The 3 overload experiments contribute zero requests to any split.

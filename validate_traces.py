@@ -159,7 +159,6 @@ def _write_experiment_json(
     """Write per-experiment validation result as JSON."""
     record = {
         "experiment": exp.dir_name,
-        "split": exp.split.value,
         "total_requests": total,
         "expected_requests": exp.num_total,
         "failed_requests": len(failures),
@@ -186,7 +185,7 @@ def main() -> int:
     total_failures_all = 0
     summary_rows: list[dict] = []
 
-    print(f"{'Experiment':<58} {'Split':<10} {'Requests':>8} {'Expected':>8} {'Fail':>6} {'Rate':>7}")
+    print(f"{'Experiment':<58} {'Requests':>8} {'Expected':>8} {'Fail':>6} {'Rate':>7}")
     print("─" * 103)
 
     for exp in EXPERIMENTS:
@@ -201,7 +200,7 @@ def main() -> int:
         count_flag = "" if total == expected else f"  ⚠ expected {expected}"
 
         print(
-            f"{exp.dir_name:<58} {exp.split.value:<10} {total:>8,} {expected:>8,} "
+            f"{exp.dir_name:<58} {total:>8,} {expected:>8,} "
             f"{n_fail:>6} {rate:>6.2%}{count_flag}"
         )
 
@@ -220,7 +219,6 @@ def main() -> int:
 
         summary_rows.append({
             "experiment": exp.dir_name,
-            "split": exp.split.value,
             "total_requests": total,
             "expected_requests": expected,
             "failed_requests": n_fail,

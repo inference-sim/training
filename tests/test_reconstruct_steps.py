@@ -488,3 +488,90 @@ def _make_raw_event(
     if status:
         attrs.append({"key": "finish.status", "value": {"stringValue": status}})
     return {"name": name, "timeUnixNano": str(int(ts * 1e9)), "attributes": attrs}
+
+
+# =============================================================================
+# Timing decomposition tests
+# =============================================================================
+
+class TestTimingDecomposition:
+    """Timing decomposition splits processing_us into prefill and decode.
+
+    The boundary is FIRST_TOKEN.ts. Preemption gaps before FIRST_TOKEN
+    are prefill gaps; after are decode gaps. The invariant
+    prefill_processing_us + decode_processing_us == processing_us holds exactly.
+    """
+
+    @pytest.fixture()
+    def simple(self):
+        """No preemption — baseline decomposition."""
+        tl = (
+            JourneyBuilder("req-simple", prompt_tokens=512, max_output_tokens=100)
+            .queued(step=0, ts=1000.0)
+            .scheduled(step=5, ts=1001.0)
+            .first_token(step=5, ts=1001.2)
+            .finished(step=104, ts=1010.0, decode_done=100)
+            .build()
+        )
+        _, labels = reconstruct_timelines([tl], max_num_batched_tokens=2048)
+        return labels[0]
+
+    @pytest.fixture()
+    def decode_preemption(self):
+        """Preemption during decode — all gap is decode gap."""
+        tl = (
+            JourneyBuilder("req-dc-pre", prompt_tokens=100, max_output_tokens=200)
+            .queued(step=0, ts=1000.0)
+            .scheduled(step=10, ts=1001.0)
+            .first_token(step=10, ts=1001.1)
+            .preempted(step=60, ts=1006.0, decode_done=50)
+            .scheduled(step=100, ts=1010.0, kind="RESUME")
+            .finished(step=249, ts=1025.0, decode_done=200)
+            .build()
+        )
+        _, labels = reconstruct_timelines([tl], max_num_batched_tokens=2048)
+        return labels[0]
+
+    @pytest.fixture()
+    def prefill_preemption(self):
+        """Preemption during prefill — gap is prefill gap."""
+        tl = (
+            JourneyBuilder("req-pf-pre", prompt_tokens=1000, max_output_tokens=50)
+            .queued(step=0, ts=1000.0)
+            .scheduled(step=10, ts=1001.0)
+            .preempted(step=11, ts=1001.5, prefill_done=600)
+            .scheduled(step=20, ts=1002.0, kind="RESUME")
+            .first_token(step=20, ts=1002.3)
+            .finished(step=69, ts=1005.0, decode_done=50)
+            .build()
+        )
+        _, labels = reconstruct_timelines([tl], max_num_batched_tokens=2048)
+        return labels[0]
+
+    # --- Invariant: prefill + decode = processing (must hold for all scenarios) ---
+
+    def test_simple_decomposition_sums_to_processing(self, simple):
+        assert abs(simple.prefill_processing_us + simple.decode_processing_us - simple.processing_us) < 1.0
+
+    def test_decode_preemption_decomposition_sums_to_processing(self, decode_preemption):
+        assert abs(decode_preemption.prefill_processing_us + decode_preemption.decode_processing_us - decode_preemption.processing_us) < 1.0
+
+    def test_prefill_preemption_decomposition_sums_to_processing(self, prefill_preemption):
+        assert abs(prefill_preemption.prefill_processing_us + prefill_preemption.decode_processing_us - prefill_preemption.processing_us) < 1.0
+
+    # --- Specific values ---
+
+    def test_simple_both_components_positive(self, simple):
+        assert simple.prefill_processing_us > 0
+        assert simple.decode_processing_us > 0
+
+    def test_decode_preemption_prefill_time_excludes_gap(self, decode_preemption):
+        # Preemption is after FIRST_TOKEN → all gap is decode, prefill unaffected
+        prefill_expected = (1001.1 - 1001.0) * 1e6  # 100000 µs
+        assert abs(decode_preemption.prefill_processing_us - prefill_expected) < 1.0
+
+    def test_prefill_preemption_prefill_time_excludes_gap(self, prefill_preemption):
+        # Prefill gap = 1002.0 - 1001.5 = 0.5s
+        # Prefill raw = 1002.3 - 1001.0 = 1.3s
+        # Prefill processing = 0.8s = 800000 µs
+        assert abs(prefill_preemption.prefill_processing_us - 800000.0) < 1.0

@@ -9,7 +9,7 @@ This repo contains 16 experiments (4 models x 4 workload profiles) of vLLM servi
 1. **Validates** trace data integrity (`validate_traces.py`)
 2. **Reconstructs** per-step batch composition from journey events (`reconstruct_steps.py`)
 3. **Computes** analytical basis functions for the latency model (`basis_functions.py`)
-4. **Fits** 10 model coefficients via two-phase optimization (`fit_coefficients.py` — planned)
+4. **Fits** 10 model coefficients via three-phase fitting (`fit_coefficients.py` — planned)
 5. **Evaluates** accuracy against held-out experiments (`evaluate.py` — planned)
 
 Design: [inference-sim/inference-sim#489](https://github.com/inference-sim/inference-sim/issues/489#issuecomment-4013680061) | Fitting spec: [inference-sim/training#3](https://github.com/inference-sim/training/issues/3)

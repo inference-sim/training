@@ -342,6 +342,9 @@ def _build_intervals(tl: RequestTimeline) -> None:
 def _compute_label(tl: RequestTimeline) -> RequestLabel:
     """Compute ground-truth timing labels from journey timestamps.
 
+    Requires:
+        tl has all 4 required lifecycle events (QUEUED, SCHEDULED, FIRST_TOKEN,
+        FINISHED) in tl.events. Events are sorted by (step, ts).
     Guarantees:
         prefill_processing_us + decode_processing_us == processing_us (exact).
         Preemption gaps partitioned by FIRST_TOKEN.ts boundary.

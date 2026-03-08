@@ -4,12 +4,12 @@ Training data and coefficient fitting pipeline for the [inference-sim](https://g
 
 ## Overview
 
-This repo contains 16 experiments (4 models x 4 workload profiles) of vLLM serving traces collected with [inference-perf](https://github.com/kubernetes-sigs/inference-perf), plus a pipeline that:
+This repo contains 16 experiments (13 active + 3 excluded overload, 4 models x 4 workload profiles) of vLLM serving traces collected with [inference-perf](https://github.com/kubernetes-sigs/inference-perf), plus a pipeline that:
 
 1. **Validates** trace data integrity (`validate_traces.py`)
 2. **Reconstructs** per-step batch composition from journey events (`reconstruct_steps.py`)
 3. **Computes** analytical basis functions for the latency model (`basis_functions.py`)
-4. **Fits** 10 model coefficients via three-phase fitting (`fit_coefficients.py` — planned)
+4. **Fits** 10 model coefficients via three-phase stacked prefill/decode NNLS (`fit_coefficients.py`)
 5. **Evaluates** accuracy against held-out experiments (`evaluate.py` — planned)
 
 Design: [inference-sim/inference-sim#489](https://github.com/inference-sim/inference-sim/issues/489#issuecomment-4013680061) | Fitting spec: [inference-sim/training#3](https://github.com/inference-sim/training/issues/3)
@@ -20,22 +20,26 @@ Design: [inference-sim/inference-sim#489](https://github.com/inference-sim/infer
 
 **Profiles:** general, codegen, roleplay, reasoning
 
-**Split:** 10 train / 3 validate / 3 test (see `split.py` for rationale)
+**Split:** Request-level 70/15/15 (train/validate/test) via SHA-256 hash of request ID (see `split.py`)
 
 ## Directory layout
 
 ```
-split.py                Single source of truth for experiment metadata and data splits
+split.py                Single source of truth for experiment metadata and request-level splits
 schemas.py              Pydantic schemas for all data formats
 trace_parser.py         Shared OTEL trace parsing utilities
 validate_traces.py      Journey trace validation (5 correctness checks)
 reconstruct_steps.py    Step reconstruction from journey events
 basis_functions.py      Analytical basis functions for the latency model
+fit_coefficients.py     Three-phase NNLS coefficient fitting
 
 tests/                  Behavioral unit tests
   conftest.py             JourneyBuilder fixture for synthetic trace data
   test_reconstruct_steps.py
   test_basis_functions.py
+  test_fit_coefficients.py
+  test_split.py
+  test_trace_parser_api.py
 
 model_configs/          HuggingFace config.json per model
 datasheets/             GPU hardware specs (H100 SXM)
@@ -48,6 +52,7 @@ default_args/           Raw experiment data
 output/                 Generated pipeline outputs (gitignored)
   validate/               Per-experiment validation JSON + summary
   reconstruct/            Per-experiment step + request JSON + summary
+  fit/                    Fitted coefficients, lambda tuning, residuals
 ```
 
 ## Setup
@@ -61,11 +66,17 @@ pip install -e ".[dev]"
 ## Usage
 
 ```bash
-# Validate all 16 experiments (writes to output/validate/)
+# Validate all active experiments (writes to output/validate/)
 python3 validate_traces.py
 
 # Reconstruct step batches and request labels (writes to output/reconstruct/)
 python3 reconstruct_steps.py
+
+# Fit 10 latency model parameters (writes to output/fit/)
+python3 fit_coefficients.py
+
+# Print experiment summary
+python3 split.py
 
 # Run tests
 pytest

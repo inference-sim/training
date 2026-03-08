@@ -303,15 +303,19 @@ def _journey_id_to_base(journey_id: str) -> str:
     return journey_id
 
 
-def collect_alpha_data() -> tuple[list[tuple[float, float]], list[tuple[float, float, int]]]:
-    """Collect timestamp pairs for α₀ and α₁/α₂ estimation from training requests.
+def collect_alpha_data(
+    split_filter: Split | None = Split.TRAIN,
+) -> tuple[list[tuple[float, float]], list[tuple[float, float, int]]]:
+    """Collect timestamp pairs for α₀ and α₁/α₂ estimation.
 
-    Iterates all active experiments, filters to training-split requests only.
+    Iterates all active experiments, filters to requests matching split_filter.
 
+    Requires: split_filter is a Split enum value or None.
     Guarantees:
         pairs_0: list of (arrived_ts, queued_ts) in seconds, queued > arrived.
         triples_12: list of (departed_ts, finished_ts, output_tokens),
                      departed > finished, output_tokens > 0.
+        If split_filter is None, includes all requests (no filtering).
 
     Returns: (pairs_0, triples_12)
     """
@@ -325,8 +329,8 @@ def collect_alpha_data() -> tuple[list[tuple[float, float]], list[tuple[float, f
         journey_ts = _extract_journey_timestamps(journey_events)
 
         for journey_id, j_data in journey_ts.items():
-            # Only use training-split requests
-            if request_split(journey_id) != Split.TRAIN:
+            # Filter by split if specified
+            if split_filter is not None and request_split(journey_id) != split_filter:
                 continue
 
             base_id = _journey_id_to_base(journey_id)
@@ -457,7 +461,7 @@ def fit_coefficients(hw: HardwareSpec) -> FittedCoefficients:
     Guarantees: all alpha >= 0, all beta >= 0, lambda chosen by validation MSE.
     """
     # Phase 1: α₀
-    pairs_0, triples_12 = collect_alpha_data()
+    pairs_0, triples_12 = collect_alpha_data(Split.TRAIN)
     alpha_0 = estimate_alpha_0(pairs_0)
 
     # Phase 2: α₁, α₂
@@ -513,7 +517,7 @@ def write_diagnostics(
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     # Phase 1 & 2 MSE (re-collect training data used for fitting)
-    pairs_0, triples_12 = collect_alpha_data()
+    pairs_0, triples_12 = collect_alpha_data(Split.TRAIN)
 
     alpha_0_observed = np.array([(q - a) * 1e6 for a, q in pairs_0])
     alpha_0_mse = float(np.mean((coeffs.alpha_0 - alpha_0_observed) ** 2)) if len(alpha_0_observed) > 0 else 0.0

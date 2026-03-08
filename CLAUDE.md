@@ -11,6 +11,7 @@ pytest                         # run tests (< 1s)
 python3 validate_traces.py      # validate all 13 active experiments → output/validate/
 python3 reconstruct_steps.py    # reconstruct steps → output/reconstruct/
 python3 fit_coefficients.py     # fit 10 parameters → output/fit/
+python3 evaluate.py             # evaluate 5 measures × 3 splits → output/evaluate/
 python3 split.py                # print experiment summary
 ```
 
@@ -22,9 +23,10 @@ python3 split.py                # print experiment summary
 - `reconstruct_steps.py` is the core module. `RequestLabel` includes `prefill_processing_us` and `decode_processing_us` (exact decomposition via FIRST_TOKEN boundary). Public API: `reconstruct_experiment()` (end-to-end) and `reconstruct_timelines()` (testable core, no filesystem).
 - `basis_functions.py` computes analytical roofline basis functions (µs) per step. Each basis function is a standalone pure function for extensibility. Public API: `compute_step_basis()` and `compute_experiment_basis()`.
 - `fit_coefficients.py` is the coefficient fitting module. Three-phase NNLS: α₀ (mean), α₁/α₂ (NNLS), β₁-β₇ (stacked prefill/decode regularized NNLS with λ tuned on validation). Uses `build_stacked_feature_matrix()` — 2 rows per request (prefill + decode targets). Public API: `fit_coefficients(hw)` → `FittedCoefficients`.
+- `evaluate.py` is the comprehensive evaluation module. 5 measures (pre-queueing, post-decode, GPU prefill, GPU decode, GPU combined) × 3 metrics (MAPE, RMSE, MAE) × 3 splits (train, validate, test). Public API: `evaluate(coeffs, hw)` → `EvaluationResult`.
 - `validate_traces.py` is independent verification. Does NOT import from `reconstruct_steps.py`.
 
-Output structure: `output/validate/<exp>.json`, `output/reconstruct/<exp>.json` (each with a `summary.json`), and `output/fit/coefficients.json`.
+Output structure: `output/validate/<exp>.json`, `output/reconstruct/<exp>.json` (each with a `summary.json`), `output/fit/coefficients.json`, and `output/evaluate/metrics.json` + `metrics.csv`.
 
 ## Key invariants
 

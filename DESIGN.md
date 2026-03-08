@@ -344,15 +344,45 @@ This three-phase reporting ensures each component's prediction quality is visibl
 
 ### Stage 5 — Evaluation (`evaluate.py`)
 
-**Planned.** MAPE / MSE / MAE metrics on validate and test splits.
+**Done.** Comprehensive evaluation of all 5 prediction targets across 3 data splits with 3 metrics each (45 cells total).
 
-Evaluation targets (each component evaluated independently against its own signal):
-- API overhead: predicted α₀ vs observed `QUEUED.ts − ARRIVED.ts`
-- Post-decode: predicted (α₁ + α₂·n) vs observed `DEPARTED.ts − FINISHED.ts`
-- GPU prefill: predicted prefill time vs observed `RequestLabel.prefill_processing_us`
-- GPU decode: predicted decode time vs observed `RequestLabel.decode_processing_us`
-- GPU combined: predicted total vs observed `RequestLabel.processing_us`
-- β diagnostic: check fitted values against expected ranges (all β should be hardware constants, not model-dependent — this is the "crossmodel" property)
+#### Evaluation matrix
+
+5 measures × 3 metrics × 3 splits = 45 cells.
+
+| Measure | Predicted | Observed | Signal |
+|---------|-----------|----------|--------|
+| Pre-queueing | α₀ (constant) | (QUEUED.ts − ARRIVED.ts) × 1e6 | API overhead per request |
+| Post-decode | α₁ + α₂·n | (DEPARTED.ts − FINISHED.ts) × 1e6 | Detokenization per request |
+| GPU prefill | X_pf @ β | prefill_processing_us | Prefill step time per request |
+| GPU decode | X_dc @ β | decode_processing_us | Decode step time per request |
+| GPU combined | (X_pf + X_dc) @ β | processing_us | Total GPU time per request |
+
+Metrics: **MAPE** (%), **RMSE** (µs), **MAE** (µs). Splits: **train**, **validate**, **test**.
+
+#### Alpha data collection
+
+`collect_alpha_data(split_filter)` generalizes the original training-only collection to accept any split (or `None` for all data). For each split, pre-queueing and post-decode metrics are computed from API + journey timestamps.
+
+#### GPU data collection
+
+When `_collect_beta_data()` or `_collect_gpu_eval_data()` calls `build_stacked_feature_matrix()` per experiment and vstacks the results, the combined matrix has the layout `[exp1_pf; exp1_dc; exp2_pf; exp2_dc; ...]`. Each per-experiment block has first-n rows for prefill and last-n rows for decode. To correctly separate prefill and decode predictions, `_collect_gpu_eval_data()` processes each experiment individually, extracting the two halves per experiment before concatenating across experiments.
+
+Combined predictions are `pf_pred + dc_pred` per request, matching the sum invariant `X_pf(r) + X_dc(r) == X_total(r)`.
+
+#### MAPE guard
+
+MAPE excludes observations where `|observed| < 1.0 µs` to avoid division by near-zero. This threshold is safe — real timing values are all > 100 µs.
+
+#### Output
+
+- `output/evaluate/metrics.json` — full 5×3×3 evaluation matrix
+- `output/evaluate/metrics.csv` — one row per (measure, split) for visualization
+- Printed table to stdout with MAPE (%), RMSE (µs), MAE (µs), n for each cell
+
+#### Public API
+
+`evaluate(coeffs, hw) -> EvaluationResult` — evaluate all 5 measures across train/validate/test splits.
 
 ---
 

@@ -512,11 +512,23 @@ def write_diagnostics(
     """
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Phase 1 & 2 MSE (re-collect training data used for fitting)
+    pairs_0, triples_12 = collect_alpha_data()
+
+    alpha_0_observed = np.array([(q - a) * 1e6 for a, q in pairs_0])
+    alpha_0_mse = float(np.mean((coeffs.alpha_0 - alpha_0_observed) ** 2)) if len(alpha_0_observed) > 0 else 0.0
+
+    alpha_12_observed = np.array([(d - f) * 1e6 for d, f, _ in triples_12])
+    alpha_12_predicted = np.array([coeffs.alpha_1 + coeffs.alpha_2 * n for _, _, n in triples_12])
+    alpha_12_mse = float(np.mean((alpha_12_predicted - alpha_12_observed) ** 2)) if len(alpha_12_observed) > 0 else 0.0
+
     # JSON output
     result = {
         "alpha_0_us": coeffs.alpha_0,
+        "alpha_0_mse": alpha_0_mse,
         "alpha_1_us": coeffs.alpha_1,
         "alpha_2_us_per_token": coeffs.alpha_2,
+        "alpha_12_mse": alpha_12_mse,
         "betas": list(coeffs.betas),
         "lambda": coeffs.lambda_val,
         "train_mse": coeffs.train_mse,
@@ -571,9 +583,11 @@ def write_diagnostics(
     print("=" * 60)
     print(f"\n  Phase 1 — API processing overhead:")
     print(f"    α₀ = {coeffs.alpha_0:,.1f} µs ({coeffs.alpha_0/1000:.1f} ms)")
+    print(f"    MSE: {alpha_0_mse:,.0f} µs²  RMSE: {np.sqrt(alpha_0_mse):,.0f} µs")
     print(f"\n  Phase 2 — Post-decode overhead:")
     print(f"    α₁ = {coeffs.alpha_1:,.1f} µs (fixed per-request)")
     print(f"    α₂ = {coeffs.alpha_2:,.2f} µs/token (detokenization)")
+    print(f"    MSE: {alpha_12_mse:,.0f} µs²  RMSE: {np.sqrt(alpha_12_mse):,.0f} µs")
     print(f"\n  Phase 3 — GPU step-time model (λ = {coeffs.lambda_val}):")
     beta_names = [
         "prefill roofline", "decode roofline", "weight loading",

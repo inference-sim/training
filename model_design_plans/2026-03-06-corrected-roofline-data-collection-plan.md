@@ -125,3 +125,32 @@ Each combo runs:
 - Actual batch sizes are determined by model throughput, not rate — record from `step.BATCH_SUMMARY` post-hoc.
 - Run Llama-8B first (cheapest) to validate the pipeline end-to-end before larger models.
 - If β confidence intervals are wide after initial fit, add runs per the [active learning pipeline](2026-03-06-corrected-roofline-active-learning.md).
+
+### Saturation filtering
+
+At high rates (especially W3 rate=128, W4-A), the system may become **saturated**: queue depth grows, KV cache fills, and vLLM begins preempting or swapping requests. Saturated steps still have valid GPU timing, but the **batch composition is scheduler-distorted** — the model sees fewer prefills than expected because the scheduler throttles new admissions, and preempted requests re-enter as partial decodes.
+
+**Collect all data, but filter before fitting.** Detection signals to record per step:
+
+| Signal | Source | Saturation indicator |
+|--------|--------|---------------------|
+| KV cache usage | `step.kv_cache_usage_pct` | > 90% |
+| Queue depth | count of ARRIVED but not SCHEDULED requests | Growing over consecutive steps |
+| Preemption events | `step.preempted_count` or scheduler logs | > 0 |
+| Swap events | `step.swapped_in` / `step.swapped_out` | > 0 |
+
+**Filtering rule:** Exclude steps where `kv_cache_usage_pct > 95%` OR `preempted_count > 0` from the β training set. These steps conflate GPU physics (what βs model) with scheduler policy (what αs model). Saturated data is still useful for α fitting and for validating the full end-to-end simulator.
+
+---
+
+## α fitting data
+
+The 3 α coefficients (queueing, preprocessing, output processing) are fit from **per-request journey tracing**, not step-level data. No additional runs are needed — enable `REQUEST_SNAPSHOT` during the same runs above and collect journey events:
+
+| α | Event pair | What it models |
+|---|-----------|---------------|
+| α₁ | ARRIVED → SCHEDULED | Queueing delay |
+| α₂ | SCHEDULED → FIRST_TOKEN | Preprocessing delay |
+| α₃ | FIRST_TOKEN → FINISHED | Output processing delay |
+
+See [`corrected-roofline-features-design.md`](2026-03-06-corrected-roofline-features-design.md) §12 for details.

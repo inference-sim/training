@@ -126,20 +126,27 @@ Each combo runs:
 - Run Llama-8B first (cheapest) to validate the pipeline end-to-end before larger models.
 - If β confidence intervals are wide after initial fit, add runs per the [active learning pipeline](2026-03-06-corrected-roofline-active-learning.md).
 
-### Saturation filtering
+### Saturated vs unsaturated steps
 
-At high rates (especially W3 rate=128, W4-A), the system may become **saturated**: queue depth grows, KV cache fills, and vLLM begins preempting or swapping requests. Saturated steps still have valid GPU timing, but the **batch composition is scheduler-distorted** — the model sees fewer prefills than expected because the scheduler throttles new admissions, and preempted requests re-enter as partial decodes.
+At high rates (W3 rate=64/128, W4-A), the system may **saturate**: queue depth grows, KV cache fills, vLLM preempts or swaps requests. These steps are not wasted — they serve different training targets than low-rate steps:
 
-**Collect all data, but filter before fitting.** Detection signals to record per step:
+| Step regime | What it trains | Why |
+|-------------|---------------|-----|
+| **Unsaturated** (low/mid rate) | **β fitting** — GPU physics | Batch composition reflects the workload config directly; step time is pure hardware |
+| **Saturated** (high rate, preemption/swap) | **α fitting** — scheduling delays | α₁ (queueing) has near-zero signal at low rates; saturation is the *only* regime where queueing delay is measurable |
+| Both | **End-to-end simulator validation** | The simulator must reproduce saturated behavior too |
 
-| Signal | Source | Saturation indicator |
-|--------|--------|---------------------|
-| KV cache usage | `step.kv_cache_usage_pct` | > 90% |
-| Queue depth | count of ARRIVED but not SCHEDULED requests | Growing over consecutive steps |
-| Preemption events | `step.preempted_count` or scheduler logs | > 0 |
+**Every run contributes to at least one training target.** Low-rate runs anchor βs; high-rate runs anchor αs; mid-rate runs contribute to both.
+
+Record these signals per step to classify the regime post-hoc:
+
+| Signal | Source | Saturated if |
+|--------|--------|-------------|
+| KV cache usage | `step.kv_cache_usage_pct` | > 95% |
+| Preemption | `step.preempted_count` | > 0 |
 | Swap events | `step.swapped_in` / `step.swapped_out` | > 0 |
 
-**Filtering rule:** Exclude steps where `kv_cache_usage_pct > 95%` OR `preempted_count > 0` from the β training set. These steps conflate GPU physics (what βs model) with scheduler policy (what αs model). Saturated data is still useful for α fitting and for validating the full end-to-end simulator.
+**Splitting rule for β fitting:** Exclude steps where `kv_cache_usage_pct > 95%` OR `preempted_count > 0`. These steps conflate GPU physics (β territory) with scheduler policy (α territory). Included steps must have clean batch composition that reflects the workload config, not scheduler throttling.
 
 ---
 
@@ -147,10 +154,10 @@ At high rates (especially W3 rate=128, W4-A), the system may become **saturated*
 
 The 3 α coefficients (queueing, preprocessing, output processing) are fit from **per-request journey tracing**, not step-level data. No additional runs are needed — enable `REQUEST_SNAPSHOT` during the same runs above and collect journey events:
 
-| α | Event pair | What it models |
-|---|-----------|---------------|
-| α₁ | ARRIVED → SCHEDULED | Queueing delay |
-| α₂ | SCHEDULED → FIRST_TOKEN | Preprocessing delay |
-| α₃ | FIRST_TOKEN → FINISHED | Output processing delay |
+| α | Event pair | What it models | Primary signal from |
+|---|-----------|---------------|---------------------|
+| α₁ | ARRIVED → SCHEDULED | Queueing delay | High-rate runs (W3 rate≥64, W4-A) — needs saturation |
+| α₂ | SCHEDULED → FIRST_TOKEN | Preprocessing delay | All runs |
+| α₃ | FIRST_TOKEN → FINISHED | Output processing delay | All runs |
 
 See [`corrected-roofline-features-design.md`](2026-03-06-corrected-roofline-features-design.md) §12 for details.

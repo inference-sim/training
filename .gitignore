@@ -36,7 +36,9 @@ default_args/*/results/stderr.log
 *.boxnote
 
 # Generated output
-output/
+output/*
+!output/fit/
+!output/evaluate/
 
 # instrumented vllm code
 vllm

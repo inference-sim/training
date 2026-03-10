@@ -93,5 +93,5 @@ class TestMyScenario:
 
 - Python 3.10+, type hints, dataclasses for data structures.
 - Output dataclasses are `frozen=True`. Internal working types are mutable.
-- `output/` is gitignored — scripts write JSON there.
+- `output/` is mostly gitignored — `output/fit/` and `output/evaluate/` are tracked; other subdirectories (validate, reconstruct) are ignored.
 - Warnings (not silent defaults) for unexpected data conditions.

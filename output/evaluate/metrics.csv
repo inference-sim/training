@@ -1,0 +1,16 @@
+measure,split,mape_pct,rmse_us,mae_us,n
+pre_queueing,train,92.6828,12274.02,4611.32,95391
+pre_queueing,validate,93.7825,14079.19,4768.20,20446
+pre_queueing,test,95.7580,16453.12,4785.10,20615
+post_decode,train,53.4520,1227.38,921.84,95391
+post_decode,validate,54.1205,1238.53,934.87,20446
+post_decode,test,54.7493,1183.96,933.28,20615
+gpu_prefill,train,22.4619,18008.95,7967.30,95396
+gpu_prefill,validate,22.4440,16084.89,7918.32,20446
+gpu_prefill,test,22.3764,17855.83,7930.69,20616
+gpu_decode,train,7.0680,496251.69,342787.05,95396
+gpu_decode,validate,7.0604,494893.33,342659.77,20446
+gpu_decode,test,7.1122,496148.51,341931.80,20616
+gpu_combined,train,6.9867,496294.85,342145.66,95396
+gpu_combined,validate,6.9801,494112.31,341991.15,20446
+gpu_combined,test,7.0317,496329.96,341332.13,20616

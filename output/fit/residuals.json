@@ -1,0 +1,106 @@
+[
+  {
+    "experiment": "20260217-231439-llama-2-7b-tp1-general",
+    "n_requests": 16800,
+    "prefill_rmse_us": 13415.598246568608,
+    "decode_rmse_us": 668151.394631729,
+    "combined_rmse_us": 472549.6082024817,
+    "mean_y_us": 1769382.1075808678
+  },
+  {
+    "experiment": "20260217-155451-llama-2-7b-tp1-codegen",
+    "n_requests": 9000,
+    "prefill_rmse_us": 4603.098873754999,
+    "decode_rmse_us": 126763.59525288283,
+    "combined_rmse_us": 89694.47474810883,
+    "mean_y_us": 1033509.9953495405
+  },
+  {
+    "experiment": "20260217-162547-llama-2-7b-tp1-roleplay",
+    "n_requests": 7200,
+    "prefill_rmse_us": 2840.550700958902,
+    "decode_rmse_us": 47452.493935796,
+    "combined_rmse_us": 33614.04400701792,
+    "mean_y_us": 1028816.7734740677
+  },
+  {
+    "experiment": "20260217-202857-llama-2-70b-tp4-general",
+    "n_requests": 16800,
+    "prefill_rmse_us": 12096.29908442812,
+    "decode_rmse_us": 449039.8388303673,
+    "combined_rmse_us": 317634.3001852462,
+    "mean_y_us": 2628650.484883011
+  },
+  {
+    "experiment": "20260217-203421-llama-2-70b-hf-tp4-codegen",
+    "n_requests": 9000,
+    "prefill_rmse_us": 10919.012874763785,
+    "decode_rmse_us": 223621.80181666536,
+    "combined_rmse_us": 158312.87864524985,
+    "mean_y_us": 2292477.0531274457
+  },
+  {
+    "experiment": "20260218-084319-llama-2-70b-tp4-roleplay",
+    "n_requests": 7200,
+    "prefill_rmse_us": 13079.933162023086,
+    "decode_rmse_us": 352471.12559622066,
+    "combined_rmse_us": 249406.2740094861,
+    "mean_y_us": 2270540.8487527166
+  },
+  {
+    "experiment": "20260218-130541-mixtral-8x7b-v0-1-tp2-general",
+    "n_requests": 16458,
+    "prefill_rmse_us": 12014.560119872132,
+    "decode_rmse_us": 454362.9582149082,
+    "combined_rmse_us": 321395.4320246917,
+    "mean_y_us": 2498926.677460194
+  },
+  {
+    "experiment": "20260218-120914-mixtral-8x7b-v0-1-tp2-codegen",
+    "n_requests": 9000,
+    "prefill_rmse_us": 37919.36663859547,
+    "decode_rmse_us": 290642.65200792195,
+    "combined_rmse_us": 207257.12235345523,
+    "mean_y_us": 2326438.7916385764
+  },
+  {
+    "experiment": "20260218-141024-mixtral-8x7b-v0-1-tp2-roleplay",
+    "n_requests": 7200,
+    "prefill_rmse_us": 46764.30159973796,
+    "decode_rmse_us": 315142.40258263855,
+    "combined_rmse_us": 225279.419621133,
+    "mean_y_us": 2330319.7420073166
+  },
+  {
+    "experiment": "20260218-150304-codellama-34b-tp2-general",
+    "n_requests": 16800,
+    "prefill_rmse_us": 9021.064992814056,
+    "decode_rmse_us": 633981.6395879908,
+    "combined_rmse_us": 448338.0972816618,
+    "mean_y_us": 2035401.8967909396
+  },
+  {
+    "experiment": "20260218-150956-codellama-34b-tp2-codegen",
+    "n_requests": 9000,
+    "prefill_rmse_us": 6230.664806504653,
+    "decode_rmse_us": 168230.25592155228,
+    "combined_rmse_us": 119038.31356198303,
+    "mean_y_us": 1852337.7497784481
+  },
+  {
+    "experiment": "20260218-155500-codellama-34b-tp2-roleplay",
+    "n_requests": 7200,
+    "prefill_rmse_us": 14386.464670408493,
+    "decode_rmse_us": 87310.07986662451,
+    "combined_rmse_us": 62570.04240061397,
+    "mean_y_us": 1825283.7251976274
+  },
+  {
+    "experiment": "20260218-160939-codellama-34b-tp2-reasoning",
+    "n_requests": 4800,
+    "prefill_rmse_us": 10180.131234761198,
+    "decode_rmse_us": 1387996.4563886796,
+    "combined_rmse_us": 981488.1043648692,
+    "mean_y_us": 19433301.21549909
+  }
+]

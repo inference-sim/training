@@ -25,6 +25,30 @@ Fork the existing `blis-inference-perf` campaign pipeline to collect training da
 
 Both pipelines deploy the instrumented vLLM so that calibration measures decode latency under the same runtime conditions (OTEL overhead, KV subscriber sidecar) as collection. The calibration pipeline's trace/KV data on the PVC is simply overwritten when the collection pipeline runs on a fresh server.
 
+## Calibration → Collection Data Flow
+
+The two pipelines are separate Tekton PipelineRuns connected by the **shared `data-pvc`**:
+
+```
+Calibration PipelineRun                    Collection PipelineRun
+─────────────────────────                  ─────────────────────────
+deploy instrumented vLLM                   deploy instrumented vLLM (fresh)
+         │                                          │
+calibrate-decode-latency                   run-blis-observe
+         │                                          │
+  writes calibration.json ──── data-pvc ──── reads calibration.json
+  to $(workspaces.data.path)                 from $(workspaces.data.path)
+  /<experimentId>-<tp>-<dlp>/                /<experimentId>-<tp>-<dlp>/
+         │                                          │
+  teardown (delete-model)                   collect-kv-events, then teardown
+```
+
+**Contract:**
+1. Both pipelines receive the **same `experimentId` param** → same `results_dir` path on PVC
+2. Both bind the **same `data-pvc`** workspace (persistent across runs)
+3. The **runner** (`run.py`) ensures calibration completes before launching collection for each experiment
+4. `run-blis-observe` has a **fail-safe**: exits with error if `calibration.json` is not found at the expected path
+
 ## Three Data Streams (collection pipeline only)
 
 | Stream | Source | Format | Mechanism |

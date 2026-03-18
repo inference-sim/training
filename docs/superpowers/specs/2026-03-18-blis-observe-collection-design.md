@@ -360,6 +360,16 @@ Stored in `blis-campaign/training-experiments.json`. Same schema as campaign plu
 
 ## blis-campaign Integration
 
+### Runner
+
+The training pipeline reuses the campaign's `run.py` scheduler loop. The runner:
+1. `generate.py --pipeline calibrate` → generates calibration pipeline YAML
+2. `run.py` deploys to cluster, polls until done, downloads `calibration.json` via `download_and_verify()`
+3. `generate.py --pipeline training` → generates collection pipeline YAML
+4. `run.py` deploys to cluster, polls until done, downloads all data via `download_and_verify()` with training-specific `REQUIRED_FILES`
+
+The `--pipeline` flag is passed through to `run.py` so it knows which `REQUIRED_FILES` to use for download verification. Everything else (deploy, poll, stall detection, retry, harvest) works identically to campaign.
+
 ### Generator changes
 
 `generate.py` gets a `--pipeline` flag with three modes:
@@ -442,15 +452,17 @@ After both pipelines run (paths relative to data-pvc root, accessed via `$(works
 
 ### Downloading data locally
 
-Same mechanism as campaign (`download.py`). No S3 upload needed.
+Same mechanism as campaign. The **runner** (`run.py`) automates the full lifecycle: deploy → poll → download → verify → cleanup. On pipeline success, `handle_success()` calls `download_and_verify()` from `download.py`, which:
 
-1. Spin up a temporary busybox pod with `data-pvc` mounted at `/data`
+1. Spins up a temporary busybox pod with `data-pvc` mounted at `/data`
 2. `kubectl exec tar cf - | tar xf -` pipes the experiment directory to local disk
-3. Verify required files are present and non-empty
+3. Verifies required files are present and non-empty
+4. Deletes the busybox pod
 
-Training-specific required files (vs campaign's `REQUIRED_FILES`):
+The training runner reuses campaign's `run.py` loop and `download.py` module. The only difference is training-specific required files for verification:
 
 ```python
+# Training (vs campaign's inference-perf results)
 REQUIRED_FILES = [
     "exp-config.yaml",
     "calibration.json",
@@ -463,7 +475,7 @@ REQUIRED_PATTERNS = [
 ]
 ```
 
-The `generate.py --pipeline training` runner reuses the same `download_and_verify()` flow from campaign, just with different required files for verification.
+The runner passes these to `download_and_verify()` when `--pipeline training` is active. Calibration pipeline runs (`--pipeline calibrate`) only require `["exp-config.yaml", "calibration.json"]`.
 
 ## Layer Coverage (38 experiments)
 

@@ -27,27 +27,63 @@ Both pipelines deploy the instrumented vLLM so that calibration measures decode 
 
 ## Calibration → Collection Data Flow
 
-The two pipelines are separate Tekton PipelineRuns connected by the **shared `data-pvc`**:
+The two pipelines are separate Tekton PipelineRuns connected by the **shared `data-pvc`**.
+
+Calibration depends only on server config (model + TP + DLP + quantization + offload), NOT on workload or rate. Multiple experiments that share the same server config share one calibration result. The 38 experiments map to ~19 unique server configs → ~19 calibration runs.
+
+### Calibration key
+
+The generator computes a `calibrationKey` from the experiment's server config:
 
 ```
-Calibration PipelineRun                    Collection PipelineRun
-─────────────────────────                  ─────────────────────────
-deploy instrumented vLLM                   deploy instrumented vLLM (fresh)
-         │                                          │
-calibrate-decode-latency                   run-blis-observe
-         │                                          │
-  writes calibration.json ──── data-pvc ──── reads calibration.json
-  to $(workspaces.data.path)                 from $(workspaces.data.path)
-  /<experimentId>-<tp>-<dlp>/                /<experimentId>-<tp>-<dlp>/
-         │                                          │
-  teardown (delete-model)                   collect-kv-events, then teardown
+<model-slug>-tp<tp>-dp<dp>[-fp8][-offload]
 ```
 
-**Contract:**
-1. Both pipelines receive the **same `experimentId` param** → same `results_dir` path on PVC
-2. Both bind the **same `data-pvc`** workspace (persistent across runs)
-3. The **runner** (`run.py`) ensures calibration completes before launching collection for each experiment
-4. `run-blis-observe` has a **fail-safe**: exits with error if `calibration.json` is not found at the expected path
+Examples: `llama-3-1-8b-tp1-dp1`, `qwen3-14b-tp1-dp1-fp8`, `llama-3-1-8b-tp1-dp1-offload`
+
+Experiments 1, 2, 3, 12, 32, 35-38 all share `llama-3-1-8b-tp1-dp1` → one calibration run covers all of them.
+
+### PVC layout
+
+```
+calibration/
+  llama-3-1-8b-tp1-dp1/
+    calibration.json       # {"model": "...", "decode_ms_per_token": 12.345, ...}
+  qwen3-14b-tp1-dp1/
+    calibration.json
+  ...
+
+<experimentId>-<tp>-<dlp>/           # Collection pipeline writes here
+  W1-prefill-heavy/r50/
+    trace-header.yaml
+    trace-data.csv
+  traces.json
+  kv_events.jsonl
+```
+
+### Data flow
+
+```
+Calibration PipelineRun                     Collection PipelineRun
+(one per unique server config)              (one per experiment)
+─────────────────────────                   ─────────────────────────
+deploy instrumented vLLM                    deploy instrumented vLLM (fresh)
+         │                                           │
+calibrate-decode-latency                    run-blis-observe
+         │                                           │
+  writes calibration.json ───── data-pvc ───── reads calibration.json
+  to calibration/<calKey>/                    from calibration/<calKey>/
+         │                                           │
+  teardown                                  collect-kv-events, then teardown
+```
+
+### Contract
+
+1. Generator computes `calibrationKey` from (model, tp, dlp, quant, offload) and deduplicates — one calibration pipeline per unique key
+2. Both pipelines bind the **same `data-pvc`** (persistent across runs)
+3. Runner runs **all calibration pipelines first**, then all collection pipelines
+4. Collection pipeline receives `calibration_key` param → `run-blis-observe` reads `calibration/<calibration_key>/calibration.json`
+5. `run-blis-observe` has a **fail-safe**: exits with error if `calibration.json` is not found
 
 ## Three Data Streams (collection pipeline only)
 
@@ -78,13 +114,18 @@ create-exp-config                              create-otel-collector
         delete-model          delete-otel-collector
 ```
 
-Same deploy-model overrides as collection (tracing, KV events). The `calibrate-decode-latency` task already exists — it sends one streaming request via Python urllib, measures inter-token timing, and writes `calibration.json` to the data workspace. Trace/KV data from the calibration request is left on the PVC but gets overwritten by the collection pipeline.
+Same deploy-model overrides as collection (tracing, KV events). The `calibrate-decode-latency` task already exists — it sends one streaming request via Python urllib, measures inter-token timing, and writes `calibration.json` to the data workspace.
+
+**Pipeline params:** `calibrationKey` (e.g. `llama-3-1-8b-tp1-dp1`), `model`, `namespace`. No `experimentId` — calibration is per server config, not per experiment.
+
+**`results_dir`** in the template resolves to `calibration/{{ calibrationKey }}` (not `<experimentId>-<tp>-<dlp>`).
 
 ### Template: `tektoncsample/blis-observe-calibrate/data_pipeline.yaml.j2`
 
 Fork of `blis-inference-perf/data_pipeline.yaml.j2`:
 - Remove `install-inference-perf` (not needed)
 - Replace `run-workload-inference-perf-blis` with `calibrate-decode-latency`
+- Replace `experimentId` param with `calibrationKey`; `results_dir` = `calibration/{{ calibrationKey }}`
 - Keep OTEL collector tasks and tracing overrides (same as collection)
 
 ### Values: `tektoncsample/blis-observe-calibrate/values.yaml`
@@ -94,13 +135,11 @@ Copy of `values-observability.yaml` (instrumented vLLM image `ghcr.io/inference-
 ### Output on data-pvc
 
 ```
-<experimentId>-<tp>-<dlp>/
+calibration/<calibrationKey>/
   calibration.json         # {"model": "...", "decode_ms_per_token": 12.345, ...}
-  traces.json              # Calibration probe traces (overwritten by collection)
-  kv_events.jsonl          # Calibration probe KV events (overwritten by collection)
 ```
 
-Tekton tasks access via `$(workspaces.data.path)/<results_dir>/...`. The vLLM pod mounts the same PVC at `/mnt/exp`.
+Tekton tasks access via `$(workspaces.data.path)/calibration/<calibrationKey>/...`.
 
 ## Pipeline 2: Data Collection
 
@@ -150,6 +189,7 @@ create-exp-config                              create-otel-collector
 +      runAfter: [ "deploy-model-{{ stackId }}" ]
 +      params:
 +        - { name: results_dir, value: "{{ stackModelLabel }}" }
++        - { name: calibration_key, value: "{{ calibrationKey }}" }
 +        - { name: workload_name, value: "{{ workload.name }}" }
 +        - { name: rate_pct, value: "{{ workload.rate_pct }}" }
 +        - { name: num_requests, value: "{{ workload.num_requests }}" }
@@ -237,6 +277,8 @@ spec:
     - name: model
     - name: namespace
     - name: results_dir
+    - name: calibration_key
+      description: "Calibration key (e.g. llama-3-1-8b-tp1-dp1) — shared across experiments with same server config"
     - name: workload_name
     - name: rate_pct
       description: "Rate as percentage of safe_rps (e.g., 50 = 50%)"
@@ -266,14 +308,15 @@ spec:
         RESULTS="$(workspaces.data.path)/$(params.results_dir)"
 
         # Read cached decode_ms_per_token from calibration pipeline
-        CAL_FILE="${RESULTS}/calibration.json"
+        # Calibration is keyed by server config, not experiment ID
+        CAL_FILE="$(workspaces.data.path)/calibration/$(params.calibration_key)/calibration.json"
         if [ ! -f "$CAL_FILE" ]; then
           echo "ERROR: calibration.json not found at $CAL_FILE" >&2
-          echo "Run the calibration pipeline first." >&2
+          echo "Run the calibration pipeline for key=$(params.calibration_key) first." >&2
           exit 1
         fi
         DMS=$(grep -o '"decode_ms_per_token":[^,}]*' "$CAL_FILE" | cut -d: -f2 | tr -d ' ')
-        echo "Cached decode_ms_per_token: ${DMS} ms"
+        echo "Cached decode_ms_per_token: ${DMS} ms (from calibration/$(params.calibration_key))"
 
         # Read max_num_batched_tokens from exp-config.yaml (written by create-exp-config)
         MBT=$(grep 'max_num_batched_tokens' "${RESULTS}/exp-config.yaml" | awk '{print $2}')
@@ -386,11 +429,16 @@ Stored in `blis-campaign/training-experiments.json`. Same schema as campaign plu
 
 ### Runner
 
-The training pipeline reuses the campaign's `run.py` scheduler loop. The runner:
-1. `generate.py --pipeline calibrate` → generates calibration pipeline YAML
-2. `run.py` deploys to cluster, polls until done, downloads `calibration.json` via `download_and_verify()`
-3. `generate.py --pipeline training` → generates collection pipeline YAML
-4. `run.py` deploys to cluster, polls until done, downloads all data via `download_and_verify()` with training-specific `REQUIRED_FILES`
+The training pipeline reuses the campaign's `run.py` scheduler loop in two phases:
+
+**Phase A: Calibrate** (~19 unique server configs)
+1. `generate.py --pipeline calibrate` → deduplicates experiments by server config, generates one calibration pipeline per unique `calibrationKey`
+2. `run.py` deploys to cluster, polls until done, downloads `calibration.json` to `calibration/<calKey>/` via `download_and_verify()`
+3. All ~19 calibrations complete before Phase B starts
+
+**Phase B: Collect** (38 experiments)
+1. `generate.py --pipeline training` → generates one collection pipeline per experiment, each referencing its `calibrationKey`
+2. `run.py` deploys to cluster, polls until done, downloads all data via `download_and_verify()` with training-specific `REQUIRED_FILES`
 
 The `--pipeline` flag is passed through to `run.py` so it knows which `REQUIRED_FILES` to use for download verification. Everything else (deploy, poll, stall detection, retry, harvest) works identically to campaign.
 
@@ -420,13 +468,15 @@ python blis-campaign/generate.py \
 When `--pipeline calibrate`:
 1. Template: `tektoncsample/blis-observe-calibrate/data_pipeline.yaml.j2`
 2. Base values: `tektoncsample/blis-observe-calibrate/values.yaml` (instrumented vLLM)
-3. No workload resolution needed — calibration uses fixed probe params
+3. **Deduplicates by server config**: computes `calibrationKey` from (model, tp, dlp, quant, offload), generates one pipeline per unique key (~19 from 38 experiments)
+4. No workload resolution needed — calibration uses fixed probe params
+5. Pipeline param: `calibrationKey` (not `experimentId`)
 
 When `--pipeline training`:
 1. Template: `tektoncsample/blis-observe/data_pipeline.yaml.j2`
 2. Base values: `tektoncsample/blis-observe/values.yaml` (instrumented vLLM)
 3. Workloads from `training-workloads.yaml`
-4. `build_values()` populates `v["workload"]` with resolved params
+4. `build_values()` populates `v["workload"]` with resolved params AND computes `calibrationKey` for the experiment's server config
 5. Everything else unchanged — `build_extra_overrides()`, `resolve_model()` work as-is
 
 ### Models requiring additions
@@ -463,15 +513,21 @@ The `collect-kv-events` task uses `kubectl cp` from the sidecar container as a s
 After both pipelines run (paths relative to data-pvc root, accessed via `$(workspaces.data.path)` in tasks and `/mnt/exp` in vLLM pod):
 
 ```
-<experimentId>-<tp>-<dlp>/
-  calibration.json         # From calibration pipeline (instrumented vLLM)
-  exp-config.yaml          # From create-exp-config task
+calibration/                              # From calibration pipeline
+  llama-3-1-8b-tp1-dp1/
+    calibration.json                      # Shared by experiments 1,2,3,12,32,35-38
+  qwen3-14b-tp1-dp1/
+    calibration.json                      # Shared by experiments 4,5,6,13,34
+  ...
+
+<experimentId>-<tp>-<dlp>/               # From collection pipeline
+  exp-config.yaml                         # create-exp-config task
   W1-prefill-heavy/
     r50/
-      trace-header.yaml    # blis observe → PVC (Tekton workspace mount)
-      trace-data.csv       # blis observe → PVC (Tekton workspace mount)
-  traces.json              # OTEL collector → PVC (/mnt/exp in vLLM pod)
-  kv_events.jsonl          # KV subscriber sidecar → PVC (/mnt/exp in vLLM pod)
+      trace-header.yaml                   # blis observe → PVC (Tekton workspace)
+      trace-data.csv                      # blis observe → PVC (Tekton workspace)
+  traces.json                             # OTEL collector → PVC (/mnt/exp)
+  kv_events.jsonl                         # KV subscriber sidecar → PVC (/mnt/exp)
 ```
 
 ### Downloading data locally

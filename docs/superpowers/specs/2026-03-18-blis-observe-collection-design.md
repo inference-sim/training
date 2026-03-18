@@ -99,8 +99,8 @@ create-exp-config                              create-otel-collector
                           |
                    collect-kv-events (existing)
                           |
-              ┌───────────┼───────────┐
-        delete-model  delete-otel-collector  raw-upload
+              ┌───────────┴───────────┐
+        delete-model          delete-otel-collector
 ```
 
 **Key:** No calibration step in this pipeline. The server only sees `blis observe` traffic. All three data streams are clean.
@@ -142,9 +142,7 @@ create-exp-config                              create-otel-collector
 -      runAfter: [ "run-workload-{{ stackId }}" ]
 +      runAfter: [ "collect-kv-events-{{ stackId }}" ]
 
-     # raw-upload also waits for collect-kv-events (was: run-workload)
-+    - name: raw-upload-{{ stackId }}
-+      runAfter: [ "collect-kv-events-{{ stackId }}" ]
++    # Remove raw-upload — download via busybox tar pipe (same as campaign)
 ```
 
 ### Values: `tektoncsample/blis-observe/values.yaml`
@@ -297,7 +295,6 @@ spec:
 | `deploy-model` / `delete-model` | Yes | Yes |
 | `calibrate-decode-latency` | Yes | — |
 | `collect-kv-events` | — | Yes |
-| `upload-s3` | — | Yes |
 
 ## Workload Profiles: W1-W6
 
@@ -415,6 +412,18 @@ Same as campaign — `build_extra_overrides()` handles it:
 | FP8 (Llama-4-Scout) | Pre-quantized checkpoint, no flag |
 | FP8 (others) | Online `--quantization=fp8` |
 
+### How each data stream reaches the PVC
+
+| Stream | Writer | Where it writes | PVC path |
+|--------|--------|----------------|----------|
+| Client trace (TraceV2) | `blis observe` in `run-blis-observe` task | Tekton data workspace mount (`--trace-header`/`--trace-data` flags) | `<results_dir>/<workload>/r<pct>/trace-{header,data}.*` |
+| Journey traces (OTEL) | OTEL collector file exporter (init container) | PVC mounted at `/mnt/exp` in vLLM pod | `<results_dir>/traces.json` |
+| KV events | kv-events-subscriber sidecar | PVC mounted at `/mnt/exp` in vLLM pod | `<results_dir>/kv_events.jsonl` |
+
+The `run-blis-observe` Tekton step runs in its own container with the `data` workspace auto-mounted. The blis binary writes directly to workspace paths, which IS the PVC.
+
+The `collect-kv-events` task uses `kubectl cp` from the sidecar container as a safety net, but the sidecar also writes directly to the PVC via `/mnt/exp`.
+
 ### On-cluster data layout
 
 After both pipelines run (paths relative to data-pvc root, accessed via `$(workspaces.data.path)` in tasks and `/mnt/exp` in vLLM pod):
@@ -422,13 +431,39 @@ After both pipelines run (paths relative to data-pvc root, accessed via `$(works
 ```
 <experimentId>-<tp>-<dlp>/
   calibration.json         # From calibration pipeline (instrumented vLLM)
+  exp-config.yaml          # From create-exp-config task
   W1-prefill-heavy/
     r50/
-      trace-header.yaml    # From collection pipeline (blis observe)
-      trace-data.csv
-  traces.json              # From collection pipeline (OTEL journey traces)
-  kv_events.jsonl          # From collection pipeline (ZMQ subscriber)
+      trace-header.yaml    # blis observe → PVC (Tekton workspace mount)
+      trace-data.csv       # blis observe → PVC (Tekton workspace mount)
+  traces.json              # OTEL collector → PVC (/mnt/exp in vLLM pod)
+  kv_events.jsonl          # KV subscriber sidecar → PVC (/mnt/exp in vLLM pod)
 ```
+
+### Downloading data locally
+
+Same mechanism as campaign (`download.py`). No S3 upload needed.
+
+1. Spin up a temporary busybox pod with `data-pvc` mounted at `/data`
+2. `kubectl exec tar cf - | tar xf -` pipes the experiment directory to local disk
+3. Verify required files are present and non-empty
+
+Training-specific required files (vs campaign's `REQUIRED_FILES`):
+
+```python
+REQUIRED_FILES = [
+    "exp-config.yaml",
+    "calibration.json",
+    "traces.json",
+    "kv_events.jsonl",
+]
+REQUIRED_PATTERNS = [
+    "*/r*/trace-header.yaml",
+    "*/r*/trace-data.csv",
+]
+```
+
+The `generate.py --pipeline training` runner reuses the same `download_and_verify()` flow from campaign, just with different required files for verification.
 
 ## Layer Coverage (38 experiments)
 

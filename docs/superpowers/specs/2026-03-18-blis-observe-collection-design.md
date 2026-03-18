@@ -141,6 +141,10 @@ create-exp-config                              create-otel-collector
      - name: delete-model-{{ stackId }}
 -      runAfter: [ "run-workload-{{ stackId }}" ]
 +      runAfter: [ "collect-kv-events-{{ stackId }}" ]
+
+     # raw-upload also waits for collect-kv-events (was: run-workload)
++    - name: raw-upload-{{ stackId }}
++      runAfter: [ "collect-kv-events-{{ stackId }}" ]
 ```
 
 ### Values: `tektoncsample/blis-observe/values.yaml`

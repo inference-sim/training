@@ -100,7 +100,7 @@ Decision: if >= 2 of 5 checks flag, classify experiment as saturated and exclude
 
 ---
 
-## Phase 1: Experiment Matrix (40 experiments)
+## Phase 1: Experiment Matrix (38 experiments)
 
 ### Coefficient identifiability map
 
@@ -169,20 +169,18 @@ Identifies beta_5 (EP dispatch) and beta_6 (EP load imbalance).
 
 Key isolation: experiments 19 vs 21 compare TP=2/EP=1 vs TP=1/EP=2 on the same model and workload. The only basis function difference is beta_4 (TP comm) vs beta_5/beta_6 (EP comm).
 
-### Layer 4: Quantization (6 experiments)
+### Layer 4: Quantization (4 experiments)
 
-Three quantization levels: FP16 (bpw=2.0, eta_quant=1.0), FP8 (bpw=1.0, eta_quant~0.9), INT4/W4A16 (bpw=0.5, eta_quant~0.65).
+Two quantization levels: FP16 (bpw=2.0, eta_quant=1.0) and FP8 (bpw=1.0, eta_quant~0.9).
 
 | # | Model | TP | Quant | Workload | Rate | Identifies |
 |---|-------|----|-------|----------|------|-----------|
 | 27 | Llama-3.1-8B-Instruct | 1 | FP8 | W1 (prefill-heavy) | 50% safe | eta_quant(FP8) effect on beta_1 |
 | 28 | Llama-3.1-8B-Instruct | 1 | FP8 | W2 (decode-heavy) | 50% safe | bpw(FP8) effect on beta_3 |
-| 29 | Llama-3.1-8B-Instruct | 1 | INT4 (GPTQ) | W1 (prefill-heavy) | 50% safe | eta_quant(INT4) effect on beta_1 |
-| 30 | Llama-3.1-8B-Instruct | 1 | INT4 (GPTQ) | W2 (decode-heavy) | 50% safe | bpw(INT4) effect on beta_3 |
-| 31 | Qwen3-14B | 1 | FP8 | W4 (balanced-long) | 50% safe | FP8 at different architecture |
-| 32 | CodeLlama-34B-Instruct-hf | 2 | FP8 | W3 (balanced-short) | 50% safe | FP8 at TP=2 |
+| 29 | Qwen3-14B | 1 | FP8 | W4 (balanced-long) | 50% safe | FP8 at different architecture |
+| 30 | CodeLlama-34B-Instruct-hf | 2 | FP8 | W3 (balanced-short) | 50% safe | FP8 at TP=2 |
 
-Comparison pairs: exp 1 (FP16) vs 27 (FP8) vs 29 (INT4) isolate eta_quant; exp 2 (FP16) vs 28 (FP8) vs 30 (INT4) isolate bpw on T_all_hbm. Scout-17B (experiments 23-24) provides additional FP8 MoE data.
+Comparison pairs: exp 1 (FP16) vs 27 (FP8) isolate eta_quant; exp 2 (FP16) vs 28 (FP8) isolate bpw on T_all_hbm. Scout-17B (experiments 23-24) provides additional FP8 MoE data.
 
 ### Layer 5: CPU KV Offload (4 experiments)
 
@@ -190,10 +188,10 @@ Identifies beta_7 (CPU-to-GPU KV transfer bandwidth).
 
 | # | Model | TP | Offload | Workload | Rate | Identifies |
 |---|-------|----|---------|----------|------|-----------|
-| 33 | Llama-3.1-8B-Instruct | 1 | Yes | W6 (kv-pressure) | 50% safe | beta_7 activation |
-| 34 | Llama-3.1-8B-Instruct | 1 | No | W6 (kv-pressure) | 50% safe | beta_7=0 reference |
-| 35 | Qwen3-14B | 1 | Yes | W6 (kv-pressure) | 50% safe | beta_7 at different model |
-| 36 | Qwen3-14B | 1 | No | W6 (kv-pressure) | 50% safe | beta_7=0 reference |
+| 31 | Llama-3.1-8B-Instruct | 1 | Yes | W6 (kv-pressure) | 50% safe | beta_7 activation |
+| 32 | Llama-3.1-8B-Instruct | 1 | No | W6 (kv-pressure) | 50% safe | beta_7=0 reference |
+| 33 | Qwen3-14B | 1 | Yes | W6 (kv-pressure) | 50% safe | beta_7 at different model |
+| 34 | Qwen3-14B | 1 | No | W6 (kv-pressure) | 50% safe | beta_7=0 reference |
 
 KV-pressure workload (long decode) maximizes KV blocks transferred, making beta_7's signal strongest.
 
@@ -203,10 +201,10 @@ Validates beta_9 scaling with batch size and tests saturation boundary.
 
 | # | Model | TP | Workload | Rate | Identifies |
 |---|-------|----|----------|------|-----------|
-| 37 | Llama-3.1-8B-Instruct | 1 | W3 (balanced-short) | 30% safe | Low batch size |
-| 38 | Llama-3.1-8B-Instruct | 1 | W3 (balanced-short) | 70% safe | Medium batch size |
-| 39 | Llama-3.1-8B-Instruct | 1 | W3 (balanced-short) | 100% safe | High batch size |
-| 40 | Llama-3.1-8B-Instruct | 1 | W3 (balanced-short) | 130% safe | Over-saturation (intentional) |
+| 35 | Llama-3.1-8B-Instruct | 1 | W3 (balanced-short) | 30% safe | Low batch size |
+| 36 | Llama-3.1-8B-Instruct | 1 | W3 (balanced-short) | 70% safe | Medium batch size |
+| 37 | Llama-3.1-8B-Instruct | 1 | W3 (balanced-short) | 100% safe | High batch size |
+| 38 | Llama-3.1-8B-Instruct | 1 | W3 (balanced-short) | 130% safe | Over-saturation (intentional) |
 
 ### Summary
 
@@ -215,12 +213,12 @@ Validates beta_9 scaling with batch size and tests saturation boundary.
 | 1: Dense diversity | 12 | 1-4 | beta_1, beta_2, beta_3, beta_8, beta_9 |
 | 2: TP isolation | 6 | 1-8 | beta_4 |
 | 3: MoE + EP | 8 | 2-8 | beta_5, beta_6 |
-| 4: Quantization | 6 | 1-2 | bpw, eta_quant effects |
+| 4: Quantization | 4 | 1-2 | bpw, eta_quant effects |
 | 5: CPU offload | 4 | 1 | beta_7 |
 | 6: Rate sweep | 4 | 1 | beta_9 + saturation boundary |
-| **Total** | **40** | | |
+| **Total** | **38** | | |
 
-Estimated GPU-hours: 40 experiments x ~15 min avg x ~2.5 avg GPUs = ~25 GPU-hours.
+Estimated GPU-hours: 38 experiments x ~15 min avg x ~2.5 avg GPUs = ~24 GPU-hours.
 
 ---
 
@@ -303,7 +301,7 @@ model: meta-llama/Llama-3.1-8B-Instruct
 tp: 1
 ep: 1
 max_num_batched_tokens: 2048
-bpw: 2.0            # Bytes per weight (FP16=2.0, FP8=1.0, INT4=0.5)
+bpw: 2.0            # Bytes per weight (FP16=2.0, FP8=1.0)
 eta_quant: 1.0       # Quantization throughput factor
 kv_dtype_bytes: 2    # KV cache precision (FP16=2, FP8=1)
 cpu_offload: false
